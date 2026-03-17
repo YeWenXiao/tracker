@@ -1,6 +1,7 @@
 """
 目标管理 HTTP API 服务器
-端口 5000，提供目标模板的上传、删除、重载、预览、SSE事件流接口。
+端口 5000，提供目标模板的上传、删除、重载、预览、SSE事件流、分组管理、报告导出接口。
+敏感接口支持 Bearer Token 认证（设置 TRACKER_API_TOKEN 环境变量启用）。
 
 可独立运行:
   python target_server.py
@@ -28,6 +29,7 @@ import os
 import json
 import time
 import threading
+import functools
 import cv2
 import numpy as np
 from flask import Flask, request, jsonify, send_file, Response
@@ -87,6 +89,29 @@ def validate_image(file):
     if size > MAX_FILE_SIZE:
         return f"文件过大: {size/1024/1024:.1f}MB，最大: {MAX_FILE_SIZE/1024/1024:.0f}MB"
     return None
+
+
+
+# ==================== API Token 认证 ====================
+
+API_TOKEN = os.environ.get("TRACKER_API_TOKEN", None)
+
+
+def require_auth(f):
+    """装饰器：需要认证的接口"""
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if API_TOKEN is None:
+            return f(*args, **kwargs)
+
+        token = request.headers.get("Authorization", "").replace("Bearer ", "")
+        if not token:
+            token = request.args.get("token", "")
+
+        if token != API_TOKEN:
+            return error_response("认证失败", 401)
+        return f(*args, **kwargs)
+    return decorated
 
 
 def set_recognizer(rec):
@@ -208,150 +233,163 @@ def index():
 <div class="events" id="eventLog"></div>
 
 <script>
+let apiToken = localStorage.getItem('tracker_api_token') || '';
+let currentGroupFilter = null;
+
+function authHeaders() {
+  const h = {};
+  if (apiToken) h['Authorization'] = 'Bearer ' + apiToken;
+  return h;
+}
+
+function setToken() {
+  apiToken = document.getElementById('tokenInput').value;
+  localStorage.setItem('tracker_api_token', apiToken);
+  document.getElementById('authStatus').textContent = apiToken ? '已设置' : '已清除';
+}
+
+function loadGroups() {
+  fetch('/api/groups').then(r => r.json()).then(data => {
+    const tabs = document.getElementById('groupTabs');
+    tabs.innerHTML = '';
+    const groups = data.groups || {};
+    const allCount = Object.values(groups).reduce((a, b) => a + b, 0);
+    let tabAll = document.createElement('div');
+    tabAll.className = 'group-tab' + (currentGroupFilter === null ? ' active' : '');
+    tabAll.innerHTML = '全部<span class="count">(' + allCount + ')</span>';
+    tabAll.onclick = () => { currentGroupFilter = null; loadGroups(); loadTargets(); };
+    tabs.appendChild(tabAll);
+    Object.entries(groups).sort().forEach(([g, cnt]) => {
+      const tab = document.createElement('div');
+      const label = g || '未分组';
+      tab.className = 'group-tab' + (currentGroupFilter === g ? ' active' : '');
+      tab.innerHTML = label + '<span class="count">(' + cnt + ')</span>';
+      tab.onclick = () => { currentGroupFilter = g; loadGroups(); loadTargets(); };
+      tabs.appendChild(tab);
+    });
+  });
+}
+
 function loadTargets() {
-  fetch("/api/targets").then(function(r){return r.json()}).then(function(data){
-    var list = document.getElementById("targetList");
-    list.innerHTML = "";
-    data.targets.forEach(function(t){
-      var card = document.createElement("div");
-      card.className = "target-card";
-      var w = t.weight !== undefined ? t.weight : 1.0;
-      var mc = t.min_confidence !== undefined ? t.min_confidence : 0.45;
-      card.innerHTML =
-        '<img src="/api/targets/' + t.crop + '/preview" alt="' + t.crop + '">' +
-        '<div class="name">' + t.crop + '</div>' +
-        '<div class="meta">' +
-        '<span class="meta-label">权重</span> ' +
-        '<input type="number" value="' + w + '" step="0.1" min="0.1" class="weight-input" ' +
-            "onchange=\"updateTarget('" + t.crop + "', this.value, null)\"> " +
-        '<span class="meta-label">阈值</span> ' +
-        '<input type="number" value="' + mc + '" step="0.05" min="0.1" max="1.0" class="weight-input" ' +
-            "onchange=\"updateTarget('" + t.crop + "', null, this.value)\">" +
-        '</div>' +
-        '<button class="btn btn-del" onclick="deleteTarget(\'' + t.crop + '\')">删除</button>';
+  fetch('/api/targets').then(r => r.json()).then(data => {
+    const list = document.getElementById('targetList');
+    list.innerHTML = '';
+    let targets = data.targets;
+    if (currentGroupFilter !== null) {
+      targets = targets.filter(t => (t.group || '') === currentGroupFilter);
+    }
+    targets.forEach(t => {
+      const card = document.createElement('div');
+      card.className = 'target-card';
+      const w = t.weight !== undefined ? t.weight : 1.0;
+      const mc = t.min_confidence !== undefined ? t.min_confidence : 0.45;
+      const g = t.group || '';
+      card.innerHTML = `
+        <img src="/api/targets/${t.crop}/preview" alt="${t.crop}">
+        <div class="name">${t.crop}</div>
+        <div class="meta">
+          W: <input type="number" value="${w}" step="0.1" min="0.1" class="weight-input"
+                    onchange="updateTarget('${t.crop}', this.value, null)">
+          MC: <input type="number" value="${mc}" step="0.05" min="0.1" max="1.0" class="weight-input"
+                     onchange="updateTarget('${t.crop}', null, this.value)">
+        </div>
+        <div style="font-size:11px;color:#666;margin:4px 0;">${g ? '分组: ' + g : ''}</div>
+        <button class="btn btn-del" onclick="deleteTarget('${t.crop}')">删除</button>
+      `;
       list.appendChild(card);
     });
   });
 }
 
 function deleteTarget(name) {
-  if (!confirm("确定删除目标 " + name + " ?")) return;
-  fetch("/api/targets/" + name, {method:"DELETE"}).then(function(r){return r.json()}).then(function(d){
-    document.getElementById("status").textContent = d.message || d.error;
-    loadTargets(); loadSnapshots();
+  if (!confirm('确定删除 ' + name + '?')) return;
+  fetch('/api/targets/' + name, {method: 'DELETE', headers: authHeaders()}).then(r => r.json()).then(d => {
+    document.getElementById('status').textContent = d.message || d.error;
+    loadTargets(); loadGroups();
   });
 }
 
 function reloadTargets() {
-  fetch("/api/targets/reload", {method:"POST"}).then(function(r){return r.json()}).then(function(d){
-    document.getElementById("status").textContent = d.message || d.error;
-    loadTargets();
+  fetch('/api/targets/reload', {method: 'POST', headers: authHeaders()}).then(r => r.json()).then(d => {
+    document.getElementById('status').textContent = d.message || d.error;
+    loadTargets(); loadGroups();
   });
 }
 
 function updateTarget(name, weight, minConf) {
-  var body = {};
+  const body = {};
   if (weight !== null) body.weight = parseFloat(weight);
   if (minConf !== null) body.min_confidence = parseFloat(minConf);
-  fetch("/api/targets/" + name, {
-    method: "PUT",
-    headers: {"Content-Type": "application/json"},
+  fetch('/api/targets/' + name, {
+    method: 'PUT',
+    headers: {...authHeaders(), 'Content-Type': 'application/json'},
     body: JSON.stringify(body)
-  }).then(function(r){return r.json()}).then(function(d){
-    document.getElementById("status").textContent = d.message || d.error;
+  }).then(r => r.json()).then(d => {
+    document.getElementById('status').textContent = d.message || d.error;
   });
 }
 
-document.getElementById("uploadForm").addEventListener("submit", function(e) {
+document.getElementById('uploadForm').addEventListener('submit', function(e) {
   e.preventDefault();
-  var fd = new FormData();
-  var fi = document.getElementById("imageInput");
-  if (!fi.files[0]) { alert("请先选择图片文件"); return; }
-  fd.append("image", fi.files[0]);
-  fd.append("weight", document.getElementById("uploadWeight").value);
-  fd.append("min_confidence", document.getElementById("uploadMinConf").value);
-  fetch("/api/targets/upload", {method:"POST", body:fd}).then(function(r){return r.json()}).then(function(d){
-    document.getElementById("status").textContent = d.message || d.error;
-    var warnDiv = document.getElementById("similarityWarning");
+  const fd = new FormData();
+  fd.append('image', document.getElementById('imageInput').files[0]);
+  fd.append('weight', document.getElementById('uploadWeight').value);
+  fd.append('min_confidence', document.getElementById('uploadMinConf').value);
+  fd.append('group', document.getElementById('uploadGroup').value);
+  fetch('/api/targets/upload', {method: 'POST', headers: authHeaders(), body: fd}).then(r => r.json()).then(d => {
+    document.getElementById('status').textContent = d.message;
+    const warnDiv = document.getElementById('similarityWarning');
     if (d.warning) {
-      warnDiv.innerHTML = '<div class="similarity-warning">&#9888; 注意: ' + d.warning + '</div>';
+      warnDiv.innerHTML = '<div class="similarity-warning">&#9888; ' + d.warning + '</div>';
     } else {
-      warnDiv.innerHTML = "";
+      warnDiv.innerHTML = '';
     }
     if (d.similar_targets && d.similar_targets.length > 0) {
-      var html = '<div style="font-size:12px;color:#888;margin:4px 0;">相似目标: ';
-      d.similar_targets.forEach(function(t){ html += t.name + "(" + (t.score*100).toFixed(0) + "%) "; });
-      html += "</div>";
+      let html = '<div style="font-size:12px;color:#888;margin:4px 0;">相似目标: ';
+      d.similar_targets.forEach(t => { html += t.name + '(' + (t.score * 100).toFixed(0) + '%) '; });
+      html += '</div>';
       warnDiv.innerHTML += html;
     }
-    loadTargets(); loadSnapshots();
+    loadTargets(); loadGroups();
   });
 });
 
-function loadSnapshots() {
-  fetch("/api/history").then(function(r){return r.json()}).then(function(data){
-    var panel = document.getElementById("rollbackPanel");
-    var snaps = data.snapshots || [];
-    if (snaps.length === 0) {
-      panel.innerHTML = '<div style="color:#888;font-size:12px;">暂无历史快照</div>';
-      return;
-    }
-    var html = "";
-    snaps.slice(0, 3).forEach(function(s){
-      var fc = s.files ? s.files.length : 0;
-      html += '<div class="snapshot">' +
-        '<span class="snap-info">' + s.timestamp + ' [' + s.label + '] ' +
-        '<span class="snap-files">' + fc + ' 个文件</span></span>' +
-        "<button class=\"btn btn-rollback\" onclick=\"rollbackTo('" + s.dir_name + "')\">回滚</button>" +
-        '</div>';
-    });
-    panel.innerHTML = html;
-  }).catch(function(){
-    document.getElementById("rollbackPanel").innerHTML =
-      '<div style="color:#888;font-size:12px;">无法加载快照</div>';
-  });
-}
-
-function rollbackTo(snapName) {
-  if (!confirm("确定回滚到快照 " + snapName + " ?\n当前目标将被替换。")) return;
-  fetch("/api/history/rollback", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({snapshot: snapName})
-  }).then(function(r){return r.json()}).then(function(d){
-    document.getElementById("status").textContent = d.message || d.error;
-    loadTargets(); loadSnapshots();
-  });
-}
-
-var evtLog = document.getElementById("eventLog");
-var evtSource = new EventSource("/api/events");
+const evtLog = document.getElementById('eventLog');
+const evtSource = new EventSource('/api/events');
 evtSource.onmessage = function(e) {
-  var data = JSON.parse(e.data);
-  if (data.type === "reload" || data.type === "targets_changed") {
-    loadTargets(); loadSnapshots();
+  const data = JSON.parse(e.data);
+  if (data.type === 'reload' || data.type === 'targets_changed') {
+    loadTargets(); loadGroups();
   }
-  var div = document.createElement("div");
-  div.className = "event";
-  var ts = data.time ? new Date(data.time * 1000).toLocaleTimeString() : "";
-  div.textContent = ts + " [" + data.type + "] " + JSON.stringify(data);
+  const div = document.createElement('div');
+  div.className = 'event';
+  const ts = data.time ? new Date(data.time * 1000).toLocaleTimeString() : '';
+  div.textContent = ts + ' [' + data.type + '] ' + JSON.stringify(data);
   evtLog.prepend(div);
   while (evtLog.children.length > 100) evtLog.removeChild(evtLog.lastChild);
 };
 
 function updateStats() {
-  fetch("/api/stats").then(function(r){return r.json()}).then(function(s){
-    document.getElementById("statFrames").textContent = s.total_frames || 0;
-    document.getElementById("statAvgTime").textContent = s.avg_time_ms ? s.avg_time_ms.toFixed(1) : "-";
-    document.getElementById("statDetRate").textContent = s.detection_rate ? (s.detection_rate*100).toFixed(1)+"%" : "-";
-    document.getElementById("statTargets").textContent = s.target_count || 0;
-    document.getElementById("statThreshold").textContent = s.adaptive_threshold || "-";
-  }).catch(function(){});
+  fetch('/api/stats').then(r => r.json()).then(s => {
+    document.getElementById('statFrames').textContent = s.total_frames || 0;
+    document.getElementById('statAvgTime').textContent = s.avg_time_ms ? s.avg_time_ms.toFixed(1) : '-';
+    document.getElementById('statDetRate').textContent = s.detection_rate ? (s.detection_rate * 100).toFixed(1) + '%' : '-';
+    document.getElementById('statTargets').textContent = s.target_count || 0;
+    document.getElementById('statThreshold').textContent = s.adaptive_threshold || '-';
+  }).catch(() => {});
 }
 setInterval(updateStats, 5000);
 updateStats();
+
+fetch('/api/targets/reload', {method: 'POST'}).then(r => {
+  if (r.status === 401) {
+    document.getElementById('authBar').style.display = 'flex';
+    if (apiToken) document.getElementById('authStatus').textContent = '已保存';
+  }
+});
+
 loadTargets();
-loadSnapshots();
+loadGroups();
 </script>
 </body>
 </html>"""
@@ -368,6 +406,7 @@ def list_targets():
 
 
 @app.route("/api/targets/upload", methods=["POST"])
+@require_auth
 def upload_target():
     if "image" not in request.files:
         return error_response("请求中未包含图片文件", 400)
@@ -469,6 +508,7 @@ def check_similarity():
     })
 
 @app.route("/api/targets/reload", methods=["POST"])
+@require_auth
 def reload_targets():
     if _recognizer is not None:
         _recognizer.reload_targets()
@@ -481,6 +521,7 @@ def reload_targets():
 
 
 @app.route("/api/targets/<name>", methods=["PUT"])
+@require_auth
 def update_target(name):
     """更新目标的 weight 和 min_confidence"""
     annotations = _read_info()
@@ -512,6 +553,7 @@ def update_target(name):
 
 
 @app.route("/api/targets/<name>", methods=["DELETE"])
+@require_auth
 def delete_target(name):
     annotations = _read_info()
 
@@ -654,6 +696,163 @@ def import_targets():
         _recognizer.reload_targets()
     annotations = _read_info()
     return jsonify({"message": "导入成功", "count": len(annotations)})
+
+
+
+# ==================== 分组管理 API ====================
+
+@app.route("/api/groups", methods=["GET"])
+def list_groups():
+    """列出所有分组和每组目标数"""
+    annotations = _read_info()
+    groups = {}
+    for ann in annotations:
+        g = ann.get("group", "")
+        groups[g] = groups.get(g, 0) + 1
+    active = _recognizer._active_group if _recognizer else None
+    return jsonify({"groups": groups, "active_group": active})
+
+
+@app.route("/api/groups/active", methods=["PUT"])
+@require_auth
+def set_active_group():
+    """设置活跃分组"""
+    data = request.get_json(silent=True) or {}
+    group = data.get("group", None)
+    if group == "" or group is None:
+        group = None
+    if _recognizer is not None:
+        _recognizer.set_active_group(group)
+    try:
+        from recognize import push_event
+        push_event({"type": "group_changed", "group": group or "全部", "time": time.time()})
+    except ImportError:
+        pass
+    return jsonify({"message": f"活跃分组已切换: {group or '全部'}", "active_group": group})
+
+
+# ==================== 识别报告 ====================
+
+def _get_group_summary():
+    """获取分组统计摘要"""
+    annotations = _read_info()
+    groups = {}
+    for ann in annotations:
+        g = ann.get("group", "") or "未分组"
+        groups[g] = groups.get(g, 0) + 1
+    return groups
+
+
+def _render_report_html(report):
+    """生成 HTML 识别报告"""
+    summary = report.get("summary", {})
+    targets = report.get("targets", [])
+    history = report.get("recent_detections", [])
+    groups = report.get("groups", {})
+    gen_time = report.get("generated_at", "")
+
+    group_items = list(groups.items())
+    total_targets = sum(groups.values()) if groups else 1
+    colors = ["#3498db", "#e74c3c", "#2ecc71", "#f39c12", "#9b59b6", "#1abc9c", "#e67e22", "#95a5a6"]
+    pie_segments = []
+    acc = 0
+    for i, (g, cnt) in enumerate(group_items):
+        pct = cnt / total_targets * 100
+        color = colors[i % len(colors)]
+        pie_segments.append(f"{color} {acc}% {acc + pct}%")
+        acc += pct
+    pie_css = f"conic-gradient({', '.join(pie_segments)})" if pie_segments else "#333"
+
+    timeline_html = ""
+    if history:
+        max_count = max((len(h.get("results", [])) for h in history), default=1) or 1
+        for h in history[-30:]:
+            ts = h.get("timestamp", 0)
+            t_str = time.strftime("%H:%M:%S", time.localtime(ts)) if ts else "?"
+            n_det = len(h.get("results", []))
+            total_ms = h.get("timing", {}).get("total", 0) * 1000
+            bar_w = max(int(n_det / max_count * 200), 2)
+            bar_color = "#2ecc71" if n_det > 0 else "#555"
+            timeline_html += f'<div style="display:flex;align-items:center;gap:8px;margin:2px 0;">'
+            timeline_html += f'<span style="width:70px;font-size:11px;color:#888;">{t_str}</span>'
+            timeline_html += f'<div style="width:{bar_w}px;height:14px;background:{bar_color};border-radius:2px;"></div>'
+            timeline_html += f'<span style="font-size:11px;color:#aaa;">{n_det}det {total_ms:.0f}ms</span>'
+            timeline_html += '</div>'
+
+    target_rows = ""
+    for t in targets:
+        crop = t.get("crop", "?")
+        w = t.get("weight", 1.0)
+        mc = t.get("min_confidence", 0.45)
+        g = t.get("group", "") or "未分组"
+        target_rows += f'<tr><td><img src="/api/targets/{crop}/preview" style="max-width:80px;max-height:60px;border-radius:4px;"></td>'
+        target_rows += f'<td>{crop}</td><td>{w}</td><td>{mc}</td><td>{g}</td></tr>'
+
+    legend_html = ""
+    for i, (g, cnt) in enumerate(group_items):
+        color = colors[i % len(colors)]
+        legend_html += f'<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;">'
+        legend_html += f'<span style="width:12px;height:12px;background:{color};border-radius:2px;display:inline-block;"></span>'
+        legend_html += f'{g}: {cnt}</span>'
+
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>识别报告 - {gen_time}</title>
+<style>
+body {{font-family:Arial,sans-serif;max-width:960px;margin:0 auto;padding:20px;background:#1a1a2e;color:#eee;}}
+h1 {{color:#0ff;}} h2 {{color:#0ff;margin-top:30px;border-bottom:1px solid #333;padding-bottom:8px;}}
+.stats-grid {{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:16px 0;}}
+.stat-card {{background:#16213e;padding:16px;border-radius:8px;text-align:center;}}
+.stat-card .value {{font-size:28px;color:#0ff;font-weight:bold;}}
+.stat-card .label {{font-size:12px;color:#888;margin-top:4px;}}
+table {{width:100%;border-collapse:collapse;margin:12px 0;}}
+th {{background:#16213e;padding:8px;text-align:left;color:#0ff;}}
+td {{padding:8px;border-bottom:1px solid #222;}}
+.pie {{width:120px;height:120px;border-radius:50%;background:{pie_css};margin:12px auto;}}
+.timeline {{background:#0d1117;padding:12px;border-radius:8px;max-height:400px;overflow-y:auto;}}
+.footer {{margin-top:30px;text-align:center;color:#555;font-size:11px;}}
+</style></head><body>
+<h1>识别报告</h1><p style="color:#888;">生成时间: {gen_time}</p>
+<h2>概要统计</h2><div class="stats-grid">
+<div class="stat-card"><div class="value">{summary.get('total_frames',0)}</div><div class="label">处理帧数</div></div>
+<div class="stat-card"><div class="value">{summary.get('avg_time_ms',0):.1f}ms</div><div class="label">平均耗时</div></div>
+<div class="stat-card"><div class="value">{summary.get('detection_rate',0)*100:.1f}%</div><div class="label">检测率</div></div>
+<div class="stat-card"><div class="value">{len(targets)}</div><div class="label">目标数量</div></div></div>
+<h2>分组统计</h2><div style="display:flex;align-items:center;gap:30px;">
+<div class="pie"></div><div>{legend_html}</div></div>
+<h2>目标列表</h2><table>
+<tr><th>缩略图</th><th>名称</th><th>权重</th><th>最低置信度</th><th>分组</th></tr>
+{target_rows}</table>
+<h2>最近检测时间线</h2><div class="timeline">
+{timeline_html if timeline_html else '<p style="color:#555;">暂无检测数据</p>'}
+</div><div class="footer">A8mini Target Tracker v1.5 - 自动生成报告</div></body></html>"""
+    return html
+
+
+@app.route("/api/report", methods=["GET"])
+def generate_report():
+    """生成识别统计报告"""
+    fmt = request.args.get("format", "json")
+    stats = {}
+    history = []
+    try:
+        from recognize import recognition_history
+        stats = recognition_history.stats()
+        history = recognition_history.recent(n=50)
+    except ImportError:
+        pass
+    targets = _read_info()
+    groups = _get_group_summary()
+    report = {
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "summary": stats,
+        "targets": targets,
+        "recent_detections": history,
+        "groups": groups,
+    }
+    if fmt == "html":
+        html = _render_report_html(report)
+        return Response(html, mimetype="text/html")
+    else:
+        return jsonify(report)
 
 
 # ==================== SSE 事件流 ====================
