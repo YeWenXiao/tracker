@@ -16,3 +16,9 @@ recognition:
 gimbal:
   ip: "192.168.144.25"
   port: 37260
+
+tracking:
+  auto_track: false
+  dead_zone: 0.1
+  speed_gain: 50
+  max_lost_frames: 10
