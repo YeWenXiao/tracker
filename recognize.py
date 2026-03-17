@@ -18,6 +18,7 @@
   python recognize.py --sensor-id 1        # 指定 MIPI 摄像头ID
   python recognize.py --verbose            # DEBUG 级别日志
   python recognize.py --log-file run.log   # 日志写入文件
+  python recognize.py --auto-track          # 云台自动跟踪目标
 """
 
 import cv2
@@ -30,6 +31,7 @@ import glob
 import logging
 
 from logger import setup_logger
+from tracker import KalmanTracker
 
 log = setup_logger("tracker")
 
@@ -540,6 +542,8 @@ def main():
                         help="DEBUG 级别日志输出")
     parser.add_argument("--log-file", type=str, default=None,
                         help="日志输出到文件")
+    parser.add_argument("--auto-track", action="store_true",
+                        help="云台自动跟踪目标")
     args = parser.parse_args()
 
     # 重新配置 logger (根据命令行参数)
@@ -580,6 +584,14 @@ def main():
     if roi_cfg and isinstance(roi_cfg, list) and len(roi_cfg) == 4:
         initial_roi = list(roi_cfg)
         log.info("配置文件预设 ROI: %s", initial_roi)
+
+    # 追踪配置
+    track_cfg = cfg.get("tracking", {})
+    if args.auto_track or track_cfg.get("auto_track", False):
+        args.auto_track = True
+    dead_zone = float(track_cfg.get("dead_zone", 0.1))
+    speed_gain = float(track_cfg.get("speed_gain", 50))
+    max_lost_frames = int(track_cfg.get("max_lost_frames", 10))
 
     t_start = time.time()
     rec = TargetRecognizer(targets_dir=targets_dir)
@@ -679,6 +691,20 @@ def main():
                     log.warning("无法连接 RTSP, 退出")
                     return
 
+        # 云台 SDK 初始化 (auto-track)
+        cam = None
+        if args.auto_track:
+            try:
+                from siyi_sdk import SIYIA8mini
+                gimbal_cfg = cfg.get("gimbal", {})
+                cam = SIYIA8mini(
+                    ip=gimbal_cfg.get("ip", "192.168.144.25"),
+                    port=int(gimbal_cfg.get("port", 37260)))
+                log.info("云台 SDK 已连接 (auto-track)")
+            except Exception as e:
+                log.warning("云台 SDK 连接失败, 禁用 auto-track: %s", e)
+                args.auto_track = False
+
         # 录像初始化
         writer = None
         if args.save:
@@ -701,6 +727,14 @@ def main():
         first_detect = [True]
         t_first_frame = [None]
         STALE_FRAME_THRESH = 0.5  # 超过500ms的帧视为过时
+
+        # 追踪器状态
+        tracker = [None]  # KalmanTracker instance
+        recognize_interval = [1]  # 每N帧做一次全识别
+        track_frame_count = [0]
+        track_status = [""]  # OSD 追踪状态文本
+        track_bbox = [None]  # 追踪框 (x, y, w, h)
+        track_predicted = [False]  # 是否为预测框
 
         # ROI 状态
         roi = initial_roi  # [x, y, w, h] or None
@@ -746,7 +780,7 @@ def main():
                 roi_temp[0] = None
 
         def recognize_loop():
-            """后台线程: 持续对最新帧做识别"""
+            """后台线程: 持续对最新帧做识别 + 追踪"""
             while running[0]:
                 with lock:
                     frame = latest_frame[0]
@@ -758,31 +792,118 @@ def main():
                 if frame_time > 0 and time.time() - frame_time > STALE_FRAME_THRESH:
                     time.sleep(0.005)
                     continue
-                # ROI 裁剪
-                current_roi = roi
-                if current_roi:
-                    rx, ry, rw, rh = current_roi
-                    fh, fw = frame.shape[:2]
-                    rx = max(0, min(rx, fw - 1))
-                    ry = max(0, min(ry, fh - 1))
-                    rw = min(rw, fw - rx)
-                    rh = min(rh, fh - ry)
-                    if rw > 10 and rh > 10:
-                        scene = frame[ry:ry+rh, rx:rx+rw]
-                        results, timing = rec.recognize(scene, fast=use_fast)
-                        results = [(s, x+rx, y+ry, w, h, m) for s, x, y, w, h, m in results]
+
+                track_frame_count[0] += 1
+
+                if tracker[0] and tracker[0].is_tracking():
+                    # === 追踪模式 ===
+                    detection = None
+                    # 每 recognize_interval 帧做一次识别来校正追踪
+                    if track_frame_count[0] % recognize_interval[0] == 0:
+                        # ROI 裁剪
+                        current_roi = roi
+                        if current_roi:
+                            rx, ry, rw, rh = current_roi
+                            fh, fw = frame.shape[:2]
+                            rx = max(0, min(rx, fw - 1))
+                            ry = max(0, min(ry, fh - 1))
+                            rw = min(rw, fw - rx)
+                            rh = min(rh, fh - ry)
+                            if rw > 10 and rh > 10:
+                                scene = frame[ry:ry+rh, rx:rx+rw]
+                                results, timing = rec.recognize(scene, fast=use_fast)
+                                results = [(s, x+rx, y+ry, w, h, m) for s, x, y, w, h, m in results]
+                            else:
+                                results, timing = rec.recognize(frame, fast=use_fast)
+                        else:
+                            results, timing = rec.recognize(frame, fast=use_fast)
+
+                        if results:
+                            best = results[0]
+                            detection = (best[1], best[2], best[3], best[4])
+                        with lock:
+                            latest_results[0] = results
+                            latest_results[1] = timing
+
+                    success, bbox = tracker[0].update(frame, detection)
+                    if not success and not tracker[0].is_tracking():
+                        # 追踪丢失，回退全帧识别
+                        tracker[0] = None
+                        recognize_interval[0] = 1
+                        track_status[0] = ""
+                        track_bbox[0] = None
+                        track_predicted[0] = False
+                        log.info("追踪器已释放, 回退全帧识别")
+                    else:
+                        track_bbox[0] = bbox
+                        if success:
+                            track_status[0] = "TRACKING"
+                            track_predicted[0] = False
+                            # 追踪稳定，逐步降低识别频率 (最多每5帧一次)
+                            if tracker[0].lost_count == 0:
+                                recognize_interval[0] = min(recognize_interval[0] + 1, 5)
+                        else:
+                            track_status[0] = "PREDICT"
+                            track_predicted[0] = True
+
+                    # 云台自动跟踪
+                    if args.auto_track and cam and tracker[0] and tracker[0].is_tracking():
+                        tx, ty, tw, th = tracker[0].bbox
+                        tcx, tcy = tx + tw / 2, ty + th / 2
+                        frame_cx = frame.shape[1] / 2
+                        frame_cy = frame.shape[0] / 2
+                        dx = (tcx - frame_cx) / frame_cx
+                        dy = (tcy - frame_cy) / frame_cy
+                        if abs(dx) > dead_zone or abs(dy) > dead_zone:
+                            yaw_speed = int(np.clip(dx * speed_gain, -100, 100))
+                            pitch_speed = int(np.clip(-dy * speed_gain, -100, 100))
+                            cam.gimbal_rotate(yaw_speed, pitch_speed)
+                        else:
+                            cam.gimbal_rotate(0, 0)
+
+                else:
+                    # === 识别模式 ===
+                    current_roi = roi
+                    if current_roi:
+                        rx, ry, rw, rh = current_roi
+                        fh, fw = frame.shape[:2]
+                        rx = max(0, min(rx, fw - 1))
+                        ry = max(0, min(ry, fh - 1))
+                        rw = min(rw, fw - rx)
+                        rh = min(rh, fh - ry)
+                        if rw > 10 and rh > 10:
+                            scene = frame[ry:ry+rh, rx:rx+rw]
+                            results, timing = rec.recognize(scene, fast=use_fast)
+                            results = [(s, x+rx, y+ry, w, h, m) for s, x, y, w, h, m in results]
+                        else:
+                            results, timing = rec.recognize(frame, fast=use_fast)
                     else:
                         results, timing = rec.recognize(frame, fast=use_fast)
-                else:
-                    results, timing = rec.recognize(frame, fast=use_fast)
-                with lock:
-                    latest_results[0] = results
-                    latest_results[1] = timing
-                if first_detect[0] and results:
+
+                    with lock:
+                        latest_results[0] = results
+                        latest_results[1] = timing
+
+                    if results:
+                        best = results[0]
+                        bbox = (best[1], best[2], best[3], best[4])
+                        tracker[0] = KalmanTracker(bbox, frame)
+                        tracker[0].max_lost = max_lost_frames
+                        recognize_interval[0] = 1
+                        track_status[0] = "TRACKING"
+                        track_bbox[0] = bbox
+                        track_predicted[0] = False
+                        log.info("目标锁定, 启动追踪器")
+                    else:
+                        track_status[0] = ""
+                        track_bbox[0] = None
+                        track_predicted[0] = False
+
+                if first_detect[0] and latest_results[0]:
                     t_found = time.time()
                     log.info("[阶段4] 首次识别到目标: %.0f ms (从启动算起)", (t_found - t_start)*1000)
-                    log.info("         识别耗时: %.0f ms", timing.get("total", 0)*1000)
-                    log.info("         找到 %d 个候选", len(results))
+                    log.info("         识别耗时: %.0f ms", latest_results[1].get("total", 0)*1000)
+                    log.info("         找到 %d 个候选", len(latest_results[0]))
                     first_detect[0] = False
 
         t = threading.Thread(target=recognize_loop, daemon=True)
@@ -791,7 +912,8 @@ def main():
         cv2.namedWindow("A8mini Live")
         cv2.setMouseCallback("A8mini Live", mouse_callback)
 
-        log.info("实时识别中 [%s] [%s]... p=暂停  f=快速/全量  d=ROI  q=退出", source_label, mode_str)
+        track_info = " [AUTO-TRACK]" if args.auto_track else ""
+        log.info("实时识别中 [%s] [%s]%s... p=暂停  f=快速/全量  d=ROI  t=释放追踪  q=退出", source_label, mode_str, track_info)
         paused = False
         first_frame = True
         fps_counter = FPSCounter(window_size=30)
@@ -839,6 +961,23 @@ def main():
                                    fps=current_fps, latency_ms=capture_latency_ms,
                                    roi=display_roi, system_stats=sys_stats_cache[0])
 
+            # 追踪框 OSD
+            t_bbox = track_bbox[0]
+            t_status = track_status[0]
+            if t_bbox is not None and t_status:
+                tx, ty, tw, th = t_bbox
+                if t_status == "TRACKING":
+                    t_color = (0, 255, 0)  # 绿色
+                else:  # PREDICT
+                    t_color = (0, 255, 255)  # 黄色
+                cv2.rectangle(display, (tx, ty), (tx + tw, ty + th), t_color, 3)
+                cv2.putText(display, t_status, (tx, ty - 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, t_color, 2)
+                # 显示识别间隔
+                intv_text = f"recog every {recognize_interval[0]}f"
+                cv2.putText(display, intv_text, (tx, ty + th + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, t_color, 1)
+
             # 写入录像（带识别框的画面）
             if writer is not None:
                 writer.write(display)
@@ -867,6 +1006,16 @@ def main():
                 else:
                     roi_drawing = True
                     log.info("ROI 绘制模式: 鼠标拖框, d/ESC取消")
+            elif key == ord('t'):
+                if tracker[0]:
+                    tracker[0] = None
+                    track_status[0] = ""
+                    track_bbox[0] = None
+                    track_predicted[0] = False
+                    recognize_interval[0] = 1
+                    if cam:
+                        cam.gimbal_rotate(0, 0)
+                    log.info("追踪器已手动释放")
             elif key == 27:  # ESC
                 if roi_drawing:
                     roi_drawing = False
@@ -880,6 +1029,9 @@ def main():
         if writer is not None:
             writer.release()
             log.info("录像已保存")
+        if cam:
+            cam.gimbal_rotate(0, 0)  # 停止云台
+            cam.close()
         cap.release()
         cv2.destroyAllWindows()
 
