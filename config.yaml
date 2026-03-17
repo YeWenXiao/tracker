@@ -11,6 +11,7 @@ video:
 recognition:
   fast_mode: true
   targets_dir: targets
+  roi: null  # [x, y, w, h] 或 null=全画面, 例: [100, 50, 1000, 600]
 
 gimbal:
   ip: "192.168.144.25"

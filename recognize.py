@@ -375,7 +375,8 @@ class TargetRecognizer:
         return keep
 
 
-def draw_results(img, results, timing=None, label="", fps=None, latency_ms=None):
+def draw_results(img, results, timing=None, label="", fps=None, latency_ms=None,
+                 roi=None, system_stats=None):
     """在图上画识别结果和计时信息"""
     display = img.copy()
     for score, x, y, w, h, method in results:
@@ -383,6 +384,31 @@ def draw_results(img, results, timing=None, label="", fps=None, latency_ms=None)
         cv2.rectangle(display, (x, y), (x+w, y+h), color, 2)
         cv2.putText(display, f"{method} {score:.2f}", (x, y-8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    # ROI 蓝色虚线框
+    if roi is not None:
+        rx, ry, rw, rh = roi
+        dash_len = 10
+        gap_len = 6
+        color_roi = (255, 150, 0)  # 蓝色
+        for edge_pts in [
+            ((rx, ry), (rx + rw, ry)),
+            ((rx + rw, ry), (rx + rw, ry + rh)),
+            ((rx + rw, ry + rh), (rx, ry + rh)),
+            ((rx, ry + rh), (rx, ry)),
+        ]:
+            pt1, pt2 = edge_pts
+            dx = pt2[0] - pt1[0]
+            dy = pt2[1] - pt1[1]
+            dist = max(int(np.sqrt(dx*dx + dy*dy)), 1)
+            for i in range(0, dist, dash_len + gap_len):
+                s = i / dist
+                e = min((i + dash_len) / dist, 1.0)
+                sp = (int(pt1[0] + dx * s), int(pt1[1] + dy * s))
+                ep = (int(pt1[0] + dx * e), int(pt1[1] + dy * e))
+                cv2.line(display, sp, ep, color_roi, 2)
+        cv2.putText(display, "ROI", (rx + 4, ry + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_roi, 1)
+
     # 左上角信息
     y_off = 25
     if label:
@@ -409,6 +435,29 @@ def draw_results(img, results, timing=None, label="", fps=None, latency_ms=None)
                 cv2.putText(display, text, (10, y_off),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                 y_off += 20
+    # 右下角系统状态 OSD
+    if system_stats:
+        img_h, img_w = display.shape[:2]
+        lines = []
+        if "cpu_temp" in system_stats:
+            t = system_stats["cpu_temp"]
+            lines.append((f"CPU: {t:.0f}C", (0, 0, 255) if t > 80 else (0, 255, 255)))
+        if "gpu_temp" in system_stats:
+            t = system_stats["gpu_temp"]
+            lines.append((f"GPU: {t:.0f}C", (0, 0, 255) if t > 80 else (0, 255, 255)))
+        if "mem_percent" in system_stats:
+            m = system_stats["mem_percent"]
+            lines.append((f"MEM: {m:.0f}%", (0, 0, 255) if m > 90 else (0, 255, 255)))
+        if lines:
+            line_h = 20
+            x_right = img_w - 10
+            y_bottom = img_h - 10
+            for i, (text, color) in enumerate(reversed(lines)):
+                y_pos = y_bottom - i * line_h
+                (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                cv2.putText(display, text, (x_right - tw, y_pos),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
     return display
 
 
@@ -500,6 +549,13 @@ def main():
             args.fast = args.fast.lower() in ("true", "1", "yes")
     targets_dir = recog_cfg.get("targets_dir", "targets")
 
+    # ROI 预设 (从配置文件)
+    roi_cfg = recog_cfg.get("roi", None)
+    initial_roi = None
+    if roi_cfg and isinstance(roi_cfg, list) and len(roi_cfg) == 4:
+        initial_roi = list(roi_cfg)
+        log.info("配置文件预设 ROI: %s", initial_roi)
+
     t_start = time.time()
     rec = TargetRecognizer(targets_dir=targets_dir)
     t_load = time.time()
@@ -553,6 +609,7 @@ def main():
 
         # ---------- 视频源初始化 ----------
         use_rtsp = args.rtsp
+        use_mipi = False
         t_conn0 = time.time()
 
         if use_rtsp:
@@ -580,6 +637,7 @@ def main():
                 log.warning("MIPI 打开失败: %s", e)
 
             if mipi_ok:
+                use_mipi = True
                 t_conn1 = time.time()
                 log.info("[阶段2] MIPI CSI 连接建立: %.0f ms", (t_conn1 - t_conn0)*1000)
                 source_label = "MIPI"
@@ -619,6 +677,45 @@ def main():
         t_first_frame = [None]
         STALE_FRAME_THRESH = 0.5  # 超过500ms的帧视为过时
 
+        # ROI 状态
+        roi = initial_roi  # [x, y, w, h] or None
+        roi_drawing = False
+        roi_start = None
+        roi_end = None
+        roi_temp = [None]
+
+        def mouse_callback(event, x, y, flags, param):
+            nonlocal roi, roi_drawing, roi_start, roi_end
+            if not roi_drawing:
+                return
+            if event == cv2.EVENT_LBUTTONDOWN:
+                roi_start = (x, y)
+                roi_end = None
+                roi_temp[0] = None
+            elif event == cv2.EVENT_MOUSEMOVE and roi_start is not None:
+                roi_end = (x, y)
+                x1, y1 = roi_start
+                x2, y2 = roi_end
+                rx, ry = min(x1, x2), min(y1, y2)
+                rw, rh = abs(x2 - x1), abs(y2 - y1)
+                if rw > 10 and rh > 10:
+                    roi_temp[0] = [rx, ry, rw, rh]
+            elif event == cv2.EVENT_LBUTTONUP and roi_start is not None:
+                roi_end = (x, y)
+                x1, y1 = roi_start
+                x2, y2 = roi_end
+                rx, ry = min(x1, x2), min(y1, y2)
+                rw, rh = abs(x2 - x1), abs(y2 - y1)
+                if rw > 10 and rh > 10:
+                    roi = [rx, ry, rw, rh]
+                    log.info("ROI 设置: %s", roi)
+                else:
+                    log.info("ROI 太小, 忽略")
+                roi_drawing = False
+                roi_start = None
+                roi_end = None
+                roi_temp[0] = None
+
         def recognize_loop():
             """后台线程: 持续对最新帧做识别"""
             while running[0]:
@@ -632,7 +729,23 @@ def main():
                 if frame_time > 0 and time.time() - frame_time > STALE_FRAME_THRESH:
                     time.sleep(0.005)
                     continue
-                results, timing = rec.recognize(frame, fast=use_fast)
+                # ROI 裁剪
+                current_roi = roi
+                if current_roi:
+                    rx, ry, rw, rh = current_roi
+                    fh, fw = frame.shape[:2]
+                    rx = max(0, min(rx, fw - 1))
+                    ry = max(0, min(ry, fh - 1))
+                    rw = min(rw, fw - rx)
+                    rh = min(rh, fh - ry)
+                    if rw > 10 and rh > 10:
+                        scene = frame[ry:ry+rh, rx:rx+rw]
+                        results, timing = rec.recognize(scene, fast=use_fast)
+                        results = [(s, x+rx, y+ry, w, h, m) for s, x, y, w, h, m in results]
+                    else:
+                        results, timing = rec.recognize(frame, fast=use_fast)
+                else:
+                    results, timing = rec.recognize(frame, fast=use_fast)
                 with lock:
                     latest_results[0] = results
                     latest_results[1] = timing
@@ -646,6 +759,9 @@ def main():
         t = threading.Thread(target=recognize_loop, daemon=True)
         t.start()
         mode_str = "FAST" if use_fast else "FULL"
+        cv2.namedWindow("A8mini Live")
+        cv2.setMouseCallback("A8mini Live", mouse_callback)
+
         log.info("实时识别中 [%s] [%s]... p=暂停  f=快速/全量  d=ROI  q=退出", source_label, mode_str)
         paused = False
         first_frame = True
@@ -653,14 +769,9 @@ def main():
 
         while True:
             t_frame_start = time.time()
-            if mipi_cam is not None:
-                frame = mipi_cam.read()
-                if frame is None:
-                    continue
-            else:
-                ret, frame = cap.read()
-                if not ret:
-                    continue
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
             capture_latency_ms = (time.time() - t_frame_start) * 1000
 
             if first_frame:
@@ -679,13 +790,19 @@ def main():
                 results = latest_results[0]
                 timing = latest_results[1]
 
-            if mipi_cam is not None:
-                current_fps = mipi_cam.get_fps()
+            if use_mipi:
+                current_fps = cap.get_actual_fps()
             else:
                 current_fps = fps_counter.tick()
             status = f"{source_label} " + ("FAST" if use_fast else "FULL") + (" PAUSED" if paused else "")
+            if roi_drawing:
+                status += " [ROI绘制中...]"
+            elif roi:
+                status += " [ROI]"
+            display_roi = roi_temp[0] if roi_drawing and roi_temp[0] else roi
             display = draw_results(frame, results, timing, status,
-                                   fps=current_fps, latency_ms=capture_latency_ms)
+                                   fps=current_fps, latency_ms=capture_latency_ms,
+                                   roi=display_roi)
 
             # 写入录像（带识别框的画面）
             if writer is not None:
@@ -702,6 +819,26 @@ def main():
             elif key == ord('f'):
                 use_fast = not use_fast
                 log.info("切换到 %s 模式", "快速(ORB+颜色)" if use_fast else "全量(5方法)")
+            elif key == ord('d'):
+                if roi_drawing:
+                    roi_drawing = False
+                    roi_start = None
+                    roi_end = None
+                    roi_temp[0] = None
+                    log.info("ROI 绘制取消")
+                elif roi:
+                    roi = None
+                    log.info("ROI 已清除")
+                else:
+                    roi_drawing = True
+                    log.info("ROI 绘制模式: 鼠标拖框, d/ESC取消")
+            elif key == 27:  # ESC
+                if roi_drawing:
+                    roi_drawing = False
+                    roi_start = None
+                    roi_end = None
+                    roi_temp[0] = None
+                    log.info("ROI 绘制取消")
 
         running[0] = False
         t.join(timeout=2)
