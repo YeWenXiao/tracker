@@ -976,6 +976,63 @@ def events():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.route("/api/docs", methods=["GET"])
+def api_docs():
+    """自动生成的 API 文档页面"""
+    # 收集所有路由信息
+    routes = []
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint == 'static':
+            continue
+        routes.append({
+            "path": rule.rule,
+            "methods": sorted([m for m in rule.methods if m not in ("HEAD", "OPTIONS")]),
+            "doc": app.view_functions[rule.endpoint].__doc__ or "",
+            "auth": "require_auth" in str(app.view_functions[rule.endpoint]),
+        })
+    routes.sort(key=lambda r: r["path"])
+
+    # 生成 HTML
+    html = """<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Tracker v1.5 API 文档</title>
+        <style>
+            body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #1a1a2e; color: #eee; }
+            h1 { color: #00d2ff; }
+            .endpoint { background: #16213e; border-radius: 8px; padding: 15px; margin: 10px 0; }
+            .method { display: inline-block; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; margin-right: 8px; }
+            .GET { background: #61affe; color: #fff; }
+            .POST { background: #49cc90; color: #fff; }
+            .PUT { background: #fca130; color: #fff; }
+            .DELETE { background: #f93e3e; color: #fff; }
+            .path { font-family: monospace; font-size: 16px; }
+            .doc { color: #aaa; margin-top: 5px; }
+            .auth { color: #fca130; font-size: 12px; }
+        </style>
+    </head>
+    <body>
+        <h1>Tracker v1.5 API 文档</h1>
+        <p>基于 SIYI A8mini 的目标识别系统 HTTP API</p>
+    """
+
+    for r in routes:
+        methods_html = "".join(f'<span class="method {m}">{m}</span>' for m in r["methods"])
+        auth_html = '<span class="auth">需要认证</span>' if r["auth"] else ""
+        html += f"""
+        <div class="endpoint">
+            {methods_html}
+            <span class="path">{r["path"]}</span>
+            {auth_html}
+            <div class="doc">{r["doc"].strip()}</div>
+        </div>
+        """
+
+    html += "</body></html>"
+    return html
+
+
 def run_server(host="0.0.0.0", port=5000, recognizer=None):
     """启动服务器（可从外部调用）"""
     if recognizer is not None:
