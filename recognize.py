@@ -124,6 +124,8 @@ recognition_history = RecognitionHistory()
 class TargetRecognizer:
     def __init__(self, targets_dir="targets"):
         self.targets = []
+        self._all_targets = []  # 所有目标（不受分组过滤）
+        self._active_group = None  # None = 显示全部
         self._targets_dir = targets_dir
         self._last_reload_time = None
         self.history = TargetHistory(targets_dir=targets_dir)
@@ -176,6 +178,7 @@ class TargetRecognizer:
             "edges": edges,
             "weight": weight,
             "min_confidence": min_confidence,
+            "group": ann.get("group", ""),
         }
 
     def _prepare_targets(self, targets_dir):
@@ -191,11 +194,19 @@ class TargetRecognizer:
                 new_targets.append(target)
         return new_targets
 
+    def _apply_group_filter(self):
+        """根据活跃分组过滤 targets"""
+        if self._active_group is None:
+            self.targets = self._all_targets
+        else:
+            self.targets = [t for t in self._all_targets if t.get("group", "") == self._active_group]
+
     def _load(self, targets_dir):
         self._targets_dir = targets_dir
-        self.targets = self._prepare_targets(targets_dir)
+        self._all_targets = self._prepare_targets(targets_dir)
+        self._apply_group_filter()
         self._last_reload_time = time.time()
-        print(f"已加载 {len(self.targets)} 个目标模板")
+        print(f"已加载 {len(self._all_targets)} 个目标模板 (活跃分组: {self._active_group or '全部'})")
 
     def reload_targets(self, targets_dir=None):
         """增量热加载：只计算新增模板的特征，保留未变化的模板"""
@@ -207,19 +218,19 @@ class TargetRecognizer:
                 annotations = json.load(f)
 
             # 检查哪些模板是新的、哪些被删除
-            old_names = {t["name"] for t in self.targets}
+            old_names = {t["name"] for t in self._all_targets}
             new_names = {ann["crop"] for ann in annotations}
 
             added = new_names - old_names
             removed = old_names - new_names
             kept = old_names & new_names
 
-            if not added and not removed:
+            if not added and not removed and group is None:
                 print("[热加载] 无变化")
                 return
 
             # 保留未变化的模板（用字典加速查找）
-            kept_map = {t["name"]: t for t in self.targets if t["name"] in kept}
+            kept_map = {t["name"]: t for t in self._all_targets if t["name"] in kept}
 
             # 只计算新增模板的特征
             added_targets = {}
@@ -257,6 +268,20 @@ class TargetRecognizer:
             })
         except Exception as e:
             print(f"[热加载] 失败: {e}")
+    def set_active_group(self, group):
+        """运行时切换活跃分组，None 表示全部"""
+        self._active_group = group
+        self._apply_group_filter()
+        print(f"[分组] 切换到: {group or '全部'} ({len(self.targets)} targets)")
+
+    def get_groups(self):
+        """返回所有分组名及每组目标数"""
+        groups = {}
+        for t in self._all_targets:
+            g = t.get("group", "")
+            groups[g] = groups.get(g, 0) + 1
+        return groups
+
     def check_similarity(self, new_image):
         """
         检查新图片与已有目标的相似度
@@ -551,6 +576,10 @@ def draw_results(img, results, timing=None, label="", recognizer=None):
         adapt_text = f"Thresh: {recognizer.adaptive_threshold.get():.3f}"
         cv2.putText(display, adapt_text, (disp_w - 200, 75),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+        # 显示活跃分组
+        group_text = f"Group: {recognizer._active_group or 'ALL'}"
+        cv2.putText(display, group_text, (disp_w - 200, 95),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 1)
         if recognizer._last_reload_time is not None:
             from datetime import datetime
             t_str = datetime.fromtimestamp(recognizer._last_reload_time).strftime("%H:%M:%S")
