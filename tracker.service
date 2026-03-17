@@ -1,0 +1,15 @@
+[Unit]
+Description=A8mini 目标识别追踪系统 v2.0
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tracker
+ExecStart=/usr/bin/python3 recognize.py --fast --auto-track --log-file /var/log/tracker.log
+Restart=always
+RestartSec=5
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=multi-user.target
