@@ -65,8 +65,14 @@ class TargetRecognizer:
         self.flann = cv2.FlannBasedMatcher(index_params, search_params)
         # CUDA 加速检测
         self.use_cuda = hasattr(cv2, 'cuda') and cv2.cuda.getCudaEnabledDeviceCount() > 0
+        self.cuda_template_matcher = None
         if self.use_cuda:
-            print('[CUDA] GPU 加速已启用 (cvtColor/resize)')
+            try:
+                self.cuda_template_matcher = cv2.cuda.createTemplateMatching(
+                    cv2.CV_8U, cv2.TM_CCOEFF_NORMED)
+                print('[CUDA] GPU 加速已启用 (cvtColor/resize/templateMatch)')
+            except Exception as e:
+                print(f'[CUDA] GPU 加速已启用 (cvtColor/resize), 模板匹配CUDA不可用: {e}')
         else:
             print('[CUDA] GPU 不可用, 使用 CPU 模式')
         self._load(targets_dir)
@@ -153,6 +159,15 @@ class TargetRecognizer:
             scene_small = scene_gray
             ds = 1.0
             scales = np.arange(0.3, 1.5, 0.1)
+        # CUDA: 场景图上传一次，多模板复用
+        gpu_scene_tmpl = None
+        if self.cuda_template_matcher is not None:
+            try:
+                gpu_scene_tmpl = cv2.cuda_GpuMat()
+                gpu_scene_tmpl.upload(scene_small)
+            except Exception:
+                gpu_scene_tmpl = None
+
         for t in self.targets:
             th, tw = t["gray"].shape[:2]
             for scale in scales:
@@ -163,7 +178,17 @@ class TargetRecognizer:
                 if nw > sw or nh > sh:
                     continue
                 resized = cv2.resize(t["gray"], (nw, nh))
-                res = cv2.matchTemplate(scene_small, resized, cv2.TM_CCOEFF_NORMED)
+                # CUDA 模板匹配 (单通道 CV_8U)
+                if gpu_scene_tmpl is not None:
+                    try:
+                        gpu_tmpl = cv2.cuda_GpuMat()
+                        gpu_tmpl.upload(resized)
+                        gpu_result = self.cuda_template_matcher.match(gpu_scene_tmpl, gpu_tmpl)
+                        res = gpu_result.download()
+                    except Exception:
+                        res = cv2.matchTemplate(scene_small, resized, cv2.TM_CCOEFF_NORMED)
+                else:
+                    res = cv2.matchTemplate(scene_small, resized, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, max_loc = cv2.minMaxLoc(res)
                 if max_val > 0.6:
                     # 坐标映射回原始分辨率
@@ -564,19 +589,26 @@ def main():
         # 共享状态
         lock = threading.Lock()
         latest_frame = [None]
+        latest_frame_time = [0]
         latest_results = [[], {}]
         running = [True]
         use_fast = args.fast
         first_detect = [True]
         t_first_frame = [None]
+        STALE_FRAME_THRESH = 0.5  # 超过500ms的帧视为过时
 
         def recognize_loop():
             """后台线程: 持续对最新帧做识别"""
             while running[0]:
                 with lock:
                     frame = latest_frame[0]
+                    frame_time = latest_frame_time[0]
                 if frame is None:
                     time.sleep(0.01)
+                    continue
+                # 跳过过时的帧（>500ms前采集的）
+                if frame_time > 0 and time.time() - frame_time > STALE_FRAME_THRESH:
+                    time.sleep(0.005)
                     continue
                 results, timing = rec.recognize(frame, fast=use_fast)
                 with lock:
@@ -618,6 +650,7 @@ def main():
             if not paused:
                 with lock:
                     latest_frame[0] = frame.copy()
+                    latest_frame_time[0] = time.time()
 
             # 取最新识别结果叠加显示
             with lock:
