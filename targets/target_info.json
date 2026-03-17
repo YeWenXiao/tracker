@@ -1,0 +1,72 @@
+[
+  {
+    "source": "zoom_1x.jpg",
+    "crop": "target_000.jpg",
+    "bbox": [
+      607,
+      213,
+      656,
+      277
+    ],
+    "image_size": [
+      1280,
+      720
+    ]
+  },
+  {
+    "source": "zoom_2x.jpg",
+    "crop": "target_001.jpg",
+    "bbox": [
+      601,
+      187,
+      657,
+      257
+    ],
+    "image_size": [
+      1280,
+      720
+    ]
+  },
+  {
+    "source": "zoom_3x.jpg",
+    "crop": "target_002.jpg",
+    "bbox": [
+      590,
+      144,
+      660,
+      236
+    ],
+    "image_size": [
+      1280,
+      720
+    ]
+  },
+  {
+    "source": "zoom_4x.jpg",
+    "crop": "target_003.jpg",
+    "bbox": [
+      574,
+      67,
+      669,
+      191
+    ],
+    "image_size": [
+      1280,
+      720
+    ]
+  },
+  {
+    "source": "zoom_4x.jpg",
+    "crop": "target_004.jpg",
+    "bbox": [
+      568,
+      71,
+      666,
+      189
+    ],
+    "image_size": [
+      1280,
+      720
+    ]
+  }
+]
