@@ -19,6 +19,7 @@
   python recognize.py --verbose            # DEBUG 级别日志
   python recognize.py --log-file run.log   # 日志写入文件
   python recognize.py --auto-track          # 云台自动跟踪目标
+  python recognize.py --multiprocess --fast  # 多进程快速模式 (实验性)
 """
 
 import cv2
@@ -618,6 +619,7 @@ def main():
   python recognize.py --auto-track      # 云台自动跟踪
   python recognize.py --fast --save     # 快速模式 + 录像
   python recognize.py --batch           # 批量测试
+  python recognize.py --multiprocess    # 多进程流水线
   python recognize.py --image x.jpg     # 单张测试
 """)
 
@@ -650,6 +652,8 @@ def main():
     track_group = parser.add_argument_group("追踪")
     track_group.add_argument("--auto-track", action="store_true",
                              help="云台自动跟踪目标")
+    track_group.add_argument("--multiprocess", action="store_true",
+                             help="多进程模式: 采集/识别分离 (实验性)")
 
     # 输出参数组
     output_group = parser.add_argument_group("输出")
@@ -756,6 +760,13 @@ def main():
         cv2.destroyAllWindows()
 
     else:
+        # 多进程模式
+        if args.multiprocess:
+            from pipeline import run_multiprocess
+            log.info("启动多进程流水线模式...")
+            run_multiprocess(args, cfg, rec_instance=rec)
+            return
+
         import threading
         from datetime import datetime
 
