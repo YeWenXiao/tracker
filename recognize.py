@@ -39,6 +39,41 @@ class TargetRecognizer:
         self.flann = cv2.FlannBasedMatcher(index_params, search_params)
         self._load(targets_dir)
 
+
+    def _prepare_single_target(self, targets_dir, ann):
+        """Compute all features for a single template, return dict or None on failure"""
+        img = cv2.imread(os.path.join(targets_dir, ann["crop"]))
+        if img is None:
+            return None
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+        # ORB
+        orb_kp, orb_des = self.orb.detectAndCompute(gray, None)
+        # SIFT
+        sift_kp, sift_des = self.sift.detectAndCompute(gray, None)
+        # HSV histogram
+        hist_hs = cv2.calcHist([hsv], [0, 1], None, [30, 32], [0, 180, 0, 256])
+        cv2.normalize(hist_hs, hist_hs)
+        # Backprojection histogram
+        hist_bp = cv2.calcHist([hsv], [0, 1], None, [180, 256], [0, 180, 0, 256])
+        cv2.normalize(hist_bp, hist_bp, 0, 255, cv2.NORM_MINMAX)
+        # Edges
+        edges = cv2.Canny(gray, 50, 150)
+
+        return {
+            "name": ann["crop"],
+            "source": ann["source"],
+            "image": img,
+            "gray": gray,
+            "hsv": hsv,
+            "orb_kp": orb_kp, "orb_des": orb_des,
+            "sift_kp": sift_kp, "sift_des": sift_des,
+            "hist_hs": hist_hs,
+            "hist_bp": hist_bp,
+            "edges": edges,
+        }
+
     def _prepare_targets(self, targets_dir):
         """Prepare target template list (does not modify self.targets), returns new list"""
         info_path = os.path.join(targets_dir, "target_info.json")
@@ -47,37 +82,9 @@ class TargetRecognizer:
 
         new_targets = []
         for ann in annotations:
-            img = cv2.imread(os.path.join(targets_dir, ann["crop"]))
-            if img is None:
-                continue
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-            # ORB
-            orb_kp, orb_des = self.orb.detectAndCompute(gray, None)
-            # SIFT
-            sift_kp, sift_des = self.sift.detectAndCompute(gray, None)
-            # HSV histogram
-            hist_hs = cv2.calcHist([hsv], [0, 1], None, [30, 32], [0, 180, 0, 256])
-            cv2.normalize(hist_hs, hist_hs)
-            # Backprojection histogram
-            hist_bp = cv2.calcHist([hsv], [0, 1], None, [180, 256], [0, 180, 0, 256])
-            cv2.normalize(hist_bp, hist_bp, 0, 255, cv2.NORM_MINMAX)
-            # Edges
-            edges = cv2.Canny(gray, 50, 150)
-
-            new_targets.append({
-                "name": ann["crop"],
-                "source": ann["source"],
-                "image": img,
-                "gray": gray,
-                "hsv": hsv,
-                "orb_kp": orb_kp, "orb_des": orb_des,
-                "sift_kp": sift_kp, "sift_des": sift_des,
-                "hist_hs": hist_hs,
-                "hist_bp": hist_bp,
-                "edges": edges,
-            })
+            target = self._prepare_single_target(targets_dir, ann)
+            if target:
+                new_targets.append(target)
         return new_targets
 
     def _load(self, targets_dir):
@@ -87,18 +94,52 @@ class TargetRecognizer:
         print(f"Loaded {len(self.targets)} target templates")
 
     def reload_targets(self, targets_dir=None):
-        """Thread-safe hot-swap target templates"""
+        """Incremental hot-reload: only compute features for new templates"""
         if targets_dir is None:
             targets_dir = self._targets_dir
         try:
-            new_targets = self._prepare_targets(targets_dir)
+            info_path = os.path.join(targets_dir, "target_info.json")
+            with open(info_path, "r", encoding="utf-8") as f:
+                annotations = json.load(f)
+
+            # Check which templates are new / removed
+            old_names = {t["name"] for t in self.targets}
+            new_names = {ann["crop"] for ann in annotations}
+
+            added = new_names - old_names
+            removed = old_names - new_names
+            kept = old_names & new_names
+
+            if not added and not removed:
+                print("[Hot-reload] No changes")
+                return
+
+            # Keep unchanged templates (dict for fast lookup)
+            kept_map = {t["name"]: t for t in self.targets if t["name"] in kept}
+
+            # Only compute features for new templates
+            added_targets = {}
+            for ann in annotations:
+                if ann["crop"] in added:
+                    target = self._prepare_single_target(targets_dir, ann)
+                    if target:
+                        added_targets[ann["crop"]] = target
+
+            # Reassemble in annotation order
+            all_targets = []
+            for ann in annotations:
+                name = ann["crop"]
+                if name in kept_map:
+                    all_targets.append(kept_map[name])
+                elif name in added_targets:
+                    all_targets.append(added_targets[name])
+
             # Atomic swap (Python GIL guarantees assignment atomicity)
-            self.targets = new_targets
+            self.targets = all_targets
             self._last_reload_time = time.time()
-            print(f"[Hot-reload] Swapped to {len(new_targets)} target templates")
+            print(f"[Hot-reload] +{len(added)} -{len(removed)} kept={len(kept)} total={len(all_targets)}")
         except Exception as e:
             print(f"[Hot-reload] Failed: {e}")
-
     def recognize(self, scene_bgr, fast=False):
         """
         Recognize targets in scene
