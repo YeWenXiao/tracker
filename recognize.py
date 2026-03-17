@@ -753,6 +753,14 @@ def main():
             writer = cv2.VideoWriter(save_path, fourcc, 25, (fw, fh))
             log.info("录像保存到: %s", save_path)
 
+        # 录像增强配置
+        rec_cfg = cfg.get("recording", {}) if isinstance(cfg.get("recording"), dict) else {}
+        save_trajectory = rec_cfg.get("save_trajectory", True)
+        save_metadata = rec_cfg.get("save_metadata", True)
+        trajectory_length = rec_cfg.get("trajectory_length", 50)
+        metadata_records = []
+        rec_frame_count = [0]
+
         # 共享状态
         lock = threading.Lock()
         latest_frame = [None]
@@ -1059,8 +1067,29 @@ def main():
                 cv2.putText(display, count_text, (display.shape[1] - 150, 25),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            # 写入录像（带识别框的画面）
+            # 追踪轨迹叠加 + 写入录像
             if writer is not None:
+                rec_frame_count[0] += 1
+                # 画轨迹线
+                if save_trajectory and tracker[0] and tracker[0].count() > 0:
+                    colors = [(0,255,0), (255,0,0), (0,0,255), (255,255,0), (0,255,255)]
+                    for idx, (tid, trk) in enumerate(tracker[0].trackers.items()):
+                        if hasattr(trk, 'trajectory') and len(trk.trajectory) >= 2:
+                            pts = np.array(trk.trajectory[-trajectory_length:], np.int32)
+                            color = colors[idx % len(colors)]
+                            cv2.polylines(display, [pts], False, color, 2)
+                # 收集元数据
+                if save_metadata and tracker[0] and tracker[0].count() > 0:
+                    meta = {
+                        "frame_id": rec_frame_count[0],
+                        "timestamp": time.time(),
+                        "tracks": [
+                            {"id": tid, "bbox": list(trk.bbox),
+                             "quality": trk.get_quality()}
+                            for tid, trk in tracker[0].trackers.items()
+                        ]
+                    }
+                    metadata_records.append(meta)
                 writer.write(display)
 
             cv2.imshow("A8mini Live", display)
@@ -1111,6 +1140,15 @@ def main():
         if writer is not None:
             writer.release()
             log.info("录像已保存")
+            # 保存元数据 JSON
+            if save_metadata and metadata_records:
+                meta_path = save_path.rsplit('.', 1)[0] + '.json'
+                try:
+                    with open(meta_path, 'w', encoding='utf-8') as mf:
+                        json.dump(metadata_records, mf, ensure_ascii=False, indent=2)
+                    log.info("元数据已保存: %s (%d 帧)", meta_path, len(metadata_records))
+                except Exception as e:
+                    log.warning("元数据保存失败: %s", e)
         if cam:
             cam.gimbal_rotate(0, 0)  # 停止云台
             cam.close()

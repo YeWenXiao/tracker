@@ -22,3 +22,8 @@ tracking:
   dead_zone: 0.1
   speed_gain: 50
   max_lost_frames: 10
+
+recording:
+  save_trajectory: true
+  save_metadata: true
+  trajectory_length: 50
