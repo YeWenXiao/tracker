@@ -25,6 +25,9 @@ import argparse
 import time
 import glob
 import queue
+from collections import deque
+
+from target_history import TargetHistory
 
 
 # 全局 SSE 事件队列列表（每个 SSE 客户端一个队列）
@@ -53,11 +56,46 @@ def unregister_sse_client(q):
         _sse_clients.remove(q)
 
 
+
+class RecognitionHistory:
+    """识别结果历史缓存"""
+    def __init__(self, maxlen=100):
+        self.history = deque(maxlen=maxlen)
+
+    def add(self, results, timing):
+        self.history.append({
+            "timestamp": time.time(),
+            "results": [(s, x, y, w, h, m) for s, x, y, w, h, m in results],
+            "timing": timing
+        })
+
+    def recent(self, n=10):
+        return list(self.history)[-n:]
+
+    def stats(self):
+        """统计信息"""
+        if not self.history:
+            return {}
+        times = [h["timing"].get("total", 0) for h in self.history]
+        detections = [len(h["results"]) for h in self.history]
+        return {
+            "total_frames": len(self.history),
+            "avg_time_ms": sum(times) / len(times) * 1000,
+            "avg_detections": sum(detections) / len(detections),
+            "detection_rate": sum(1 for d in detections if d > 0) / len(detections)
+        }
+
+
+# 全局识别历史实例
+recognition_history = RecognitionHistory()
+
+
 class TargetRecognizer:
     def __init__(self, targets_dir="targets"):
         self.targets = []
         self._targets_dir = targets_dir
         self._last_reload_time = None
+        self.history = TargetHistory(targets_dir=targets_dir)
         self.orb = cv2.ORB_create(nfeatures=2000)
         self.sift = cv2.SIFT_create(nfeatures=1000)
         self.bf_hamming = cv2.BFMatcher(cv2.NORM_HAMMING)
@@ -172,6 +210,11 @@ class TargetRecognizer:
             self.targets = all_targets
             self._last_reload_time = time.time()
             print(f"[热加载] +{len(added)} -{len(removed)} 保留{len(kept)} = 共{len(all_targets)} 个模板")
+            # 保存目标快照到历史
+            try:
+                self.history.save_snapshot(label=f"reload_+{len(added)}_-{len(removed)}")
+            except Exception as e:
+                print(f"[History] 快照保存失败: {e}")
             # 推送 SSE 重载事件
             push_event({
                 "type": "reload",
@@ -569,6 +612,8 @@ def main():
                     time.sleep(0.01)
                     continue
                 results, timing = rec.recognize(frame, fast=use_fast)
+                # 记录识别历史
+                recognition_history.add(results, timing)
                 with lock:
                     latest_results[0] = results
                     latest_results[1] = timing
