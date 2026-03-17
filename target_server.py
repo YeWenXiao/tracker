@@ -124,107 +124,127 @@ def _write_info(annotations):
 
 @app.route("/", methods=["GET"])
 def index():
-    """简单的目标管理页面"""
+    """目标管理系统页面"""
     html = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>目标管理</title>
+<title>目标管理系统</title>
 <style>
   body { font-family: Arial, sans-serif; max-width: 960px; margin: 0 auto; padding: 20px; background: #1a1a2e; color: #eee; }
   h1 { color: #0ff; }
+  h3 { color: #ccc; margin-top: 24px; }
   .targets { display: flex; flex-wrap: wrap; gap: 16px; }
   .target-card { background: #16213e; border-radius: 8px; padding: 12px; width: 200px; text-align: center; }
   .target-card img { max-width: 180px; max-height: 140px; border-radius: 4px; }
   .target-card .name { font-size: 12px; color: #aaa; margin: 6px 0; word-break: break-all; }
-  .target-card .meta { font-size: 11px; color: #888; }
+  .target-card .meta { font-size: 11px; color: #888; margin: 4px 0; }
+  .target-card .meta-label { color: #0ff; font-size: 10px; }
   .btn { padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
-  .btn-del { background: #e74c3c; color: #fff; }
+  .btn-del { background: #e74c3c; color: #fff; margin-top: 6px; }
   .btn-del:hover { background: #c0392b; }
-  .btn-reload { background: #2ecc71; color: #fff; margin: 10px 0; }
+  .btn-reload { background: #2ecc71; color: #fff; margin: 10px 4px; }
   .btn-reload:hover { background: #27ae60; }
+  .btn-rollback { background: #9b59b6; color: #fff; margin: 2px; font-size: 11px; padding: 4px 8px; }
+  .btn-rollback:hover { background: #8e44ad; }
   .upload-area { background: #16213e; padding: 20px; border-radius: 8px; margin: 20px 0; }
   .upload-area input[type=file] { margin: 8px 0; }
   .btn-upload { background: #3498db; color: #fff; }
   .btn-upload:hover { background: #2980b9; }
   .events { background: #0d1117; padding: 10px; border-radius: 4px; max-height: 200px; overflow-y: auto;
-            font-family: monospace; font-size: 12px; margin-top: 20px; }
+            font-family: monospace; font-size: 12px; margin-top: 10px; }
   .events .event { padding: 2px 0; color: #0f0; }
   .weight-input { width: 50px; background: #222; color: #fff; border: 1px solid #444; border-radius: 3px; text-align: center; }
-  .stats-panel { background: #16213e; padding: 16px; border-radius: 8px; margin: 20px 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .stats-panel { background: #16213e; padding: 16px; border-radius: 8px; margin: 20px 0; display: grid;
+                 grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
   .stat-item { text-align: center; }
   .stat-item .value { font-size: 24px; color: #0ff; font-weight: bold; }
   .stat-item .label { font-size: 12px; color: #888; margin-top: 4px; }
-  .similarity-warning { background: #e74c3c33; border: 1px solid #e74c3c; padding: 8px 12px; border-radius: 4px; margin: 8px 0; color: #e74c3c; }
+  .similarity-warning { background: #e74c3c33; border: 1px solid #e74c3c; padding: 8px 12px;
+                        border-radius: 4px; margin: 8px 0; color: #e74c3c; }
+  .rollback-panel { background: #16213e; padding: 12px; border-radius: 8px; margin: 10px 0; }
+  .snapshot { display: flex; justify-content: space-between; align-items: center;
+              padding: 6px 0; border-bottom: 1px solid #333; font-size: 12px; }
+  .snapshot:last-child { border-bottom: none; }
+  .snap-info { color: #aaa; }
+  .snap-files { color: #666; font-size: 11px; }
 </style>
 </head>
 <body>
-<h1>A8mini 目标管理</h1>
+<h1>目标管理系统</h1>
 
 <div class="upload-area">
-  <h3>上传新目标</h3>
+  <h3 style="margin-top:0">上传目标</h3>
   <form id="uploadForm" enctype="multipart/form-data">
     <input type="file" id="imageInput" name="image" accept="image/*">
     <label>权重: <input type="number" id="uploadWeight" value="1.0" step="0.1" min="0.1" class="weight-input"></label>
     <label>最低置信度: <input type="number" id="uploadMinConf" value="0.45" step="0.05" min="0.1" max="1.0" class="weight-input"></label>
-    <button type="submit" class="btn btn-upload">上传</button>
+    <button type="submit" class="btn btn-upload">上传目标</button>
   </form>
 </div>
 
 <h3>识别统计</h3>
 <div class="stats-panel" id="statsPanel">
-  <div class="stat-item"><div class="value" id="statFrames">-</div><div class="label">处理帧数</div></div>
+  <div class="stat-item"><div class="value" id="statFrames">-</div><div class="label">总帧数</div></div>
   <div class="stat-item"><div class="value" id="statAvgTime">-</div><div class="label">平均耗时(ms)</div></div>
   <div class="stat-item"><div class="value" id="statDetRate">-</div><div class="label">检测率</div></div>
   <div class="stat-item"><div class="value" id="statTargets">-</div><div class="label">目标数量</div></div>
   <div class="stat-item"><div class="value" id="statThreshold">-</div><div class="label">自适应阈值</div></div>
 </div>
 
-<button class="btn btn-reload" onclick="reloadTargets()">重新加载模板</button>
-<span id="status"></span>
+<button class="btn btn-reload" onclick="reloadTargets()">刷新</button>
+<span id="status" style="color:#0f0;"></span>
 <div id="similarityWarning"></div>
 
+<h3>目标列表</h3>
 <div class="targets" id="targetList"></div>
 
-<h3>实时事件</h3>
+<h3>历史快照</h3>
+<div class="rollback-panel" id="rollbackPanel">
+  <div style="color:#888;font-size:12px;">加载中...</div>
+</div>
+
+<h3>事件日志</h3>
 <div class="events" id="eventLog"></div>
 
 <script>
 function loadTargets() {
-  fetch('/api/targets').then(r => r.json()).then(data => {
-    const list = document.getElementById('targetList');
-    list.innerHTML = '';
-    data.targets.forEach(t => {
-      const card = document.createElement('div');
-      card.className = 'target-card';
-      const w = t.weight !== undefined ? t.weight : 1.0;
-      const mc = t.min_confidence !== undefined ? t.min_confidence : 0.45;
+  fetch("/api/targets").then(function(r){return r.json()}).then(function(data){
+    var list = document.getElementById("targetList");
+    list.innerHTML = "";
+    data.targets.forEach(function(t){
+      var card = document.createElement("div");
+      card.className = "target-card";
+      var w = t.weight !== undefined ? t.weight : 1.0;
+      var mc = t.min_confidence !== undefined ? t.min_confidence : 0.45;
       card.innerHTML =
         '<img src="/api/targets/' + t.crop + '/preview" alt="' + t.crop + '">' +
         '<div class="name">' + t.crop + '</div>' +
         '<div class="meta">' +
-        'W: <input type="number" value="' + w + '" step="0.1" min="0.1" class="weight-input" ' +
-            'onchange="updateTarget(\\'' + t.crop + '\\', this.value, null)"> ' +
-        'MC: <input type="number" value="' + mc + '" step="0.05" min="0.1" max="1.0" class="weight-input" ' +
-            'onchange="updateTarget(\\'' + t.crop + '\\', null, this.value)">' +
+        '<span class="meta-label">权重</span> ' +
+        '<input type="number" value="' + w + '" step="0.1" min="0.1" class="weight-input" ' +
+            "onchange=\"updateTarget('" + t.crop + "', this.value, null)\"> " +
+        '<span class="meta-label">阈值</span> ' +
+        '<input type="number" value="' + mc + '" step="0.05" min="0.1" max="1.0" class="weight-input" ' +
+            "onchange=\"updateTarget('" + t.crop + "', null, this.value)\">" +
         '</div>' +
-        '<button class="btn btn-del" onclick="deleteTarget(\\'' + t.crop + '\\')">删除</button>';
+        '<button class="btn btn-del" onclick="deleteTarget(\'' + t.crop + '\')">删除</button>';
       list.appendChild(card);
     });
   });
 }
 
 function deleteTarget(name) {
-  if (!confirm('确定删除 ' + name + '?')) return;
-  fetch('/api/targets/' + name, {method: 'DELETE'}).then(r => r.json()).then(d => {
-    document.getElementById('status').textContent = d.message;
-    loadTargets();
+  if (!confirm("确定删除目标 " + name + " ?")) return;
+  fetch("/api/targets/" + name, {method:"DELETE"}).then(function(r){return r.json()}).then(function(d){
+    document.getElementById("status").textContent = d.message || d.error;
+    loadTargets(); loadSnapshots();
   });
 }
 
 function reloadTargets() {
-  fetch('/api/targets/reload', {method: 'POST'}).then(r => r.json()).then(d => {
-    document.getElementById('status').textContent = d.message;
+  fetch("/api/targets/reload", {method:"POST"}).then(function(r){return r.json()}).then(function(d){
+    document.getElementById("status").textContent = d.message || d.error;
     loadTargets();
   });
 }
@@ -233,71 +253,109 @@ function updateTarget(name, weight, minConf) {
   var body = {};
   if (weight !== null) body.weight = parseFloat(weight);
   if (minConf !== null) body.min_confidence = parseFloat(minConf);
-  fetch('/api/targets/' + name, {
-    method: 'PUT',
-    headers: {'Content-Type': 'application/json'},
+  fetch("/api/targets/" + name, {
+    method: "PUT",
+    headers: {"Content-Type": "application/json"},
     body: JSON.stringify(body)
-  }).then(r => r.json()).then(d => {
-    document.getElementById('status').textContent = d.message || d.error;
+  }).then(function(r){return r.json()}).then(function(d){
+    document.getElementById("status").textContent = d.message || d.error;
   });
 }
 
-document.getElementById('uploadForm').addEventListener('submit', function(e) {
+document.getElementById("uploadForm").addEventListener("submit", function(e) {
   e.preventDefault();
   var fd = new FormData();
-  fd.append('image', document.getElementById('imageInput').files[0]);
-  fd.append('weight', document.getElementById('uploadWeight').value);
-  fd.append('min_confidence', document.getElementById('uploadMinConf').value);
-  fetch('/api/targets/upload', {method: 'POST', body: fd}).then(r => r.json()).then(d => {
-    document.getElementById('status').textContent = d.message;
-    const warnDiv = document.getElementById('similarityWarning');
+  var fi = document.getElementById("imageInput");
+  if (!fi.files[0]) { alert("请先选择图片文件"); return; }
+  fd.append("image", fi.files[0]);
+  fd.append("weight", document.getElementById("uploadWeight").value);
+  fd.append("min_confidence", document.getElementById("uploadMinConf").value);
+  fetch("/api/targets/upload", {method:"POST", body:fd}).then(function(r){return r.json()}).then(function(d){
+    document.getElementById("status").textContent = d.message || d.error;
+    var warnDiv = document.getElementById("similarityWarning");
     if (d.warning) {
-      warnDiv.innerHTML = '<div class="similarity-warning">&#9888; ' + d.warning + '</div>';
+      warnDiv.innerHTML = '<div class="similarity-warning">&#9888; 注意: ' + d.warning + '</div>';
     } else {
-      warnDiv.innerHTML = '';
+      warnDiv.innerHTML = "";
     }
     if (d.similar_targets && d.similar_targets.length > 0) {
-      let html = '<div style="font-size:12px;color:#888;margin:4px 0;">相似目标: ';
-      d.similar_targets.forEach(t => { html += t.name + '(' + (t.score * 100).toFixed(0) + '%) '; });
-      html += '</div>';
+      var html = '<div style="font-size:12px;color:#888;margin:4px 0;">相似目标: ';
+      d.similar_targets.forEach(function(t){ html += t.name + "(" + (t.score*100).toFixed(0) + "%) "; });
+      html += "</div>";
       warnDiv.innerHTML += html;
     }
-    loadTargets();
+    loadTargets(); loadSnapshots();
   });
 });
 
-// SSE 事件流 + 多客户端状态同步
-var evtLog = document.getElementById('eventLog');
-var evtSource = new EventSource('/api/events');
+function loadSnapshots() {
+  fetch("/api/history").then(function(r){return r.json()}).then(function(data){
+    var panel = document.getElementById("rollbackPanel");
+    var snaps = data.snapshots || [];
+    if (snaps.length === 0) {
+      panel.innerHTML = '<div style="color:#888;font-size:12px;">暂无历史快照</div>';
+      return;
+    }
+    var html = "";
+    snaps.slice(0, 3).forEach(function(s){
+      var fc = s.files ? s.files.length : 0;
+      html += '<div class="snapshot">' +
+        '<span class="snap-info">' + s.timestamp + ' [' + s.label + '] ' +
+        '<span class="snap-files">' + fc + ' 个文件</span></span>' +
+        "<button class=\"btn btn-rollback\" onclick=\"rollbackTo('" + s.dir_name + "')\">回滚</button>" +
+        '</div>';
+    });
+    panel.innerHTML = html;
+  }).catch(function(){
+    document.getElementById("rollbackPanel").innerHTML =
+      '<div style="color:#888;font-size:12px;">无法加载快照</div>';
+  });
+}
+
+function rollbackTo(snapName) {
+  if (!confirm("确定回滚到快照 " + snapName + " ?\n当前目标将被替换。")) return;
+  fetch("/api/history/rollback", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({snapshot: snapName})
+  }).then(function(r){return r.json()}).then(function(d){
+    document.getElementById("status").textContent = d.message || d.error;
+    loadTargets(); loadSnapshots();
+  });
+}
+
+var evtLog = document.getElementById("eventLog");
+var evtSource = new EventSource("/api/events");
 evtSource.onmessage = function(e) {
   var data = JSON.parse(e.data);
-  if (data.type === 'reload' || data.type === 'targets_changed') {
-    loadTargets();
+  if (data.type === "reload" || data.type === "targets_changed") {
+    loadTargets(); loadSnapshots();
   }
-  var div = document.createElement('div');
-  div.className = 'event';
-  var ts = data.time ? new Date(data.time * 1000).toLocaleTimeString() : '';
-  div.textContent = ts + ' [' + data.type + '] ' + JSON.stringify(data);
+  var div = document.createElement("div");
+  div.className = "event";
+  var ts = data.time ? new Date(data.time * 1000).toLocaleTimeString() : "";
+  div.textContent = ts + " [" + data.type + "] " + JSON.stringify(data);
   evtLog.prepend(div);
   while (evtLog.children.length > 100) evtLog.removeChild(evtLog.lastChild);
 };
 
 function updateStats() {
-  fetch('/api/stats').then(function(r) { return r.json(); }).then(function(s) {
-    document.getElementById('statFrames').textContent = s.total_frames || 0;
-    document.getElementById('statAvgTime').textContent = s.avg_time_ms ? s.avg_time_ms.toFixed(1) : '-';
-    document.getElementById('statDetRate').textContent = s.detection_rate ? (s.detection_rate * 100).toFixed(1) + '%' : '-';
-    document.getElementById('statTargets').textContent = s.target_count || 0;
-    document.getElementById('statThreshold').textContent = s.adaptive_threshold || '-';
-  }).catch(function() {});
+  fetch("/api/stats").then(function(r){return r.json()}).then(function(s){
+    document.getElementById("statFrames").textContent = s.total_frames || 0;
+    document.getElementById("statAvgTime").textContent = s.avg_time_ms ? s.avg_time_ms.toFixed(1) : "-";
+    document.getElementById("statDetRate").textContent = s.detection_rate ? (s.detection_rate*100).toFixed(1)+"%" : "-";
+    document.getElementById("statTargets").textContent = s.target_count || 0;
+    document.getElementById("statThreshold").textContent = s.adaptive_threshold || "-";
+  }).catch(function(){});
 }
 setInterval(updateStats, 5000);
 updateStats();
-
 loadTargets();
+loadSnapshots();
 </script>
 </body>
 </html>"""
+
     return html
 
 
