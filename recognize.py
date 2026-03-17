@@ -31,7 +31,7 @@ import glob
 import logging
 
 from logger import setup_logger
-from tracker import KalmanTracker
+from tracker import KalmanTracker, MultiTracker
 
 log = setup_logger("tracker")
 
@@ -765,7 +765,7 @@ def main():
         STALE_FRAME_THRESH = 0.5  # 超过500ms的帧视为过时
 
         # 追踪器状态
-        tracker = [None]  # KalmanTracker instance
+        tracker = [None]  # MultiTracker instance
         recognize_interval = [1]  # 每N帧做一次全识别
         track_frame_count = [0]
         track_status = [""]  # OSD 追踪状态文本
@@ -831,7 +831,7 @@ def main():
 
                 track_frame_count[0] += 1
 
-                if tracker[0] and tracker[0].is_tracking():
+                if tracker[0] and tracker[0].count() > 0:
                     # === 追踪模式 ===
                     detection = None
                     # 每 recognize_interval 帧做一次识别来校正追踪
@@ -861,30 +861,37 @@ def main():
                             latest_results[0] = results
                             latest_results[1] = timing
 
-                    success, bbox = tracker[0].update(frame, detection)
-                    if not success and not tracker[0].is_tracking():
-                        # 追踪丢失，回退全帧识别
+                    # MultiTracker: 用全部检测结果更新
+                    if detection:
+                        mt_results = tracker[0].update(frame, [(0,) + detection + ("",)])
+                    else:
+                        mt_results = tracker[0].update(frame)
+
+                    if tracker[0].count() == 0:
+                        # 所有目标丢失，回退全帧识别
                         tracker[0] = None
                         recognize_interval[0] = 1
                         track_status[0] = ""
                         track_bbox[0] = None
                         track_predicted[0] = False
-                        log.info("追踪器已释放, 回退全帧识别")
+                        log.info("所有追踪目标已丢失, 回退全帧识别")
                     else:
-                        track_bbox[0] = bbox
-                        if success:
-                            track_status[0] = "TRACKING"
-                            track_predicted[0] = False
-                            # 追踪稳定，逐步降低识别频率 (最多每5帧一次)
-                            if tracker[0].lost_count == 0:
+                        # 用主目标的状态更新 OSD
+                        primary_tid, primary_trk = tracker[0].get_primary()
+                        if primary_trk:
+                            track_bbox[0] = primary_trk.bbox
+                            if primary_trk.lost_count == 0:
+                                track_status[0] = f"TRACK #{primary_tid}"
+                                track_predicted[0] = False
                                 recognize_interval[0] = min(recognize_interval[0] + 1, 5)
-                        else:
-                            track_status[0] = "PREDICT"
-                            track_predicted[0] = True
+                            else:
+                                track_status[0] = f"PREDICT #{primary_tid}"
+                                track_predicted[0] = True
 
                     # 云台自动跟踪
-                    if args.auto_track and cam and tracker[0] and tracker[0].is_tracking():
-                        tx, ty, tw, th = tracker[0].bbox
+                    if args.auto_track and cam and tracker[0] and tracker[0].count() > 0:
+                        primary_tid_g, primary_trk_g = tracker[0].get_primary()
+                        tx, ty, tw, th = primary_trk_g.bbox if primary_trk_g else (0,0,0,0)
                         tcx, tcy = tx + tw / 2, ty + th / 2
                         frame_cx = frame.shape[1] / 2
                         frame_cy = frame.shape[0] / 2
@@ -923,13 +930,14 @@ def main():
                     if results:
                         best = results[0]
                         bbox = (best[1], best[2], best[3], best[4])
-                        tracker[0] = KalmanTracker(bbox, frame)
-                        tracker[0].max_lost = max_lost_frames
+                        tracker[0] = MultiTracker(max_targets=5)
+                        tid = tracker[0].add(bbox, frame)
+                        tracker[0].trackers[tid].max_lost = max_lost_frames
                         recognize_interval[0] = 1
-                        track_status[0] = "TRACKING"
+                        track_status[0] = f"TRACK #{tid}"
                         track_bbox[0] = bbox
                         track_predicted[0] = False
-                        log.info("目标锁定, 启动追踪器")
+                        log.info("目标锁定, 启动多目标追踪器 (#%d)", tid)
                     else:
                         track_status[0] = ""
                         track_bbox[0] = None
@@ -1024,22 +1032,32 @@ def main():
                                    fps=current_fps, latency_ms=capture_latency_ms,
                                    roi=display_roi, system_stats=sys_stats_cache[0])
 
-            # 追踪框 OSD
-            t_bbox = track_bbox[0]
-            t_status = track_status[0]
-            if t_bbox is not None and t_status:
-                tx, ty, tw, th = t_bbox
-                if t_status == "TRACKING":
-                    t_color = (0, 255, 0)  # 绿色
-                else:  # PREDICT
-                    t_color = (0, 255, 255)  # 黄色
-                cv2.rectangle(display, (tx, ty), (tx + tw, ty + th), t_color, 3)
-                cv2.putText(display, t_status, (tx, ty - 12),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, t_color, 2)
-                # 显示识别间隔
-                intv_text = f"recog every {recognize_interval[0]}f"
-                cv2.putText(display, intv_text, (tx, ty + th + 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, t_color, 1)
+            # 追踪框 OSD (多目标)
+            if tracker[0] and tracker[0].count() > 0:
+                primary_tid_osd, _ = tracker[0].get_primary()
+                for tid, trk in tracker[0].trackers.items():
+                    tx, ty, tw, th = trk.bbox
+                    is_primary = (tid == primary_tid_osd)
+                    if trk.lost_count == 0:
+                        t_color = (0, 255, 0) if is_primary else (0, 200, 0)
+                    else:
+                        t_color = (0, 255, 255) if is_primary else (0, 200, 200)
+                    thickness = 3 if is_primary else 2
+                    cv2.rectangle(display, (tx, ty), (tx + tw, ty + th), t_color, thickness)
+                    # ID + 质量分
+                    quality = trk.get_quality()
+                    q_score = quality["continuity"]
+                    id_text = f"#{tid} Q:{q_score:.2f}"
+                    cv2.putText(display, id_text, (tx, ty - 12),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, t_color, 2)
+                    if is_primary:
+                        intv_text = f"recog every {recognize_interval[0]}f"
+                        cv2.putText(display, intv_text, (tx, ty + th + 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, t_color, 1)
+                # 左上角追踪数量
+                count_text = f"Targets: {tracker[0].count()}"
+                cv2.putText(display, count_text, (display.shape[1] - 150, 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
             # 写入录像（带识别框的画面）
             if writer is not None:
@@ -1071,6 +1089,7 @@ def main():
                     log.info("ROI 绘制模式: 鼠标拖框, d/ESC取消")
             elif key == ord('t'):
                 if tracker[0]:
+                    tracker[0].clear()
                     tracker[0] = None
                     track_status[0] = ""
                     track_bbox[0] = None
@@ -1078,7 +1097,7 @@ def main():
                     recognize_interval[0] = 1
                     if cam:
                         cam.gimbal_rotate(0, 0)
-                    log.info("追踪器已手动释放")
+                    log.info("多目标追踪器已手动释放")
             elif key == 27:  # ESC
                 if roi_drawing:
                     roi_drawing = False
