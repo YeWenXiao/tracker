@@ -14,6 +14,9 @@
   python recognize.py --fast               # RTSP实时 快速模式 (ORB+颜色, ~30fps)
   python recognize.py --save               # RTSP实时 + 录像保存
   python recognize.py --fast --save        # 快速模式 + 录像保存
+  python recognize.py --mipi               # MIPI CSI 实时 (低延迟)
+  python recognize.py --mipi --fast        # MIPI CSI 快速模式
+  python recognize.py --mipi --sensor-id 1 # 指定摄像头ID
 """
 
 import cv2
@@ -289,7 +292,7 @@ class TargetRecognizer:
         return keep
 
 
-def draw_results(img, results, timing=None, label=""):
+def draw_results(img, results, timing=None, label="", fps=None, latency_ms=None):
     """在图上画识别结果和计时信息"""
     display = img.copy()
     for score, x, y, w, h, method in results:
@@ -303,6 +306,18 @@ def draw_results(img, results, timing=None, label=""):
         cv2.putText(display, label, (10, y_off),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         y_off += 25
+    # 实时 FPS 和延迟显示
+    if fps is not None:
+        fps_text = f"FPS: {fps:.1f}"
+        cv2.putText(display, fps_text, (10, y_off),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        y_off += 22
+    if latency_ms is not None:
+        lat_color = (0, 255, 0) if latency_ms < 50 else (0, 255, 255) if latency_ms < 100 else (0, 0, 255)
+        lat_text = f"Latency: {latency_ms:.1f}ms"
+        cv2.putText(display, lat_text, (10, y_off),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, lat_color, 2)
+        y_off += 22
     if timing:
         for key in ["template", "orb", "sift", "color_bp", "edge", "nms_verify", "total"]:
             if key in timing:
@@ -323,13 +338,45 @@ def print_timing(timing):
     print(f"    {'总计':12s}: {timing.get('total',0)*1000:6.0f} ms")
 
 
+class FPSCounter:
+    """滑动窗口 FPS 计算器"""
+
+    def __init__(self, window_size=30):
+        self.window_size = window_size
+        self.timestamps = []
+
+    def tick(self):
+        """记录一帧时间戳，返回当前 FPS"""
+        now = time.time()
+        self.timestamps.append(now)
+        if len(self.timestamps) > self.window_size:
+            self.timestamps = self.timestamps[-self.window_size:]
+        if len(self.timestamps) < 2:
+            return 0.0
+        elapsed = self.timestamps[-1] - self.timestamps[0]
+        if elapsed <= 0:
+            return 0.0
+        return (len(self.timestamps) - 1) / elapsed
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", type=str, help="测试图片路径")
     parser.add_argument("--batch", action="store_true", help="批量测试captures/下所有图片")
     parser.add_argument("--fast", action="store_true", help="快速模式: 只用ORB+颜色 (~20ms)")
     parser.add_argument("--save", action="store_true", help="保存识别视频到 recordings/")
-    parser.add_argument("--rtsp", default="rtsp://192.168.144.25:8554/main.264")
+    parser.add_argument("--rtsp", default="rtsp://192.168.144.25:8554/main.264",
+                        help="RTSP 视频流地址")
+    parser.add_argument("--mipi", action="store_true",
+                        help="使用 MIPI CSI 摄像头 (低延迟，替代RTSP)")
+    parser.add_argument("--sensor-id", type=int, default=0,
+                        help="MIPI 摄像头编号 (默认0)")
+    parser.add_argument("--width", type=int, default=1280,
+                        help="MIPI 采集宽度 (默认1280)")
+    parser.add_argument("--height", type=int, default=720,
+                        help="MIPI 采集高度 (默认720)")
+    parser.add_argument("--fps-cap", type=int, default=30,
+                        help="MIPI 采集帧率 (默认30)")
     args = parser.parse_args()
 
     t_start = time.time()
@@ -383,12 +430,24 @@ def main():
         import threading
         from datetime import datetime
 
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-        t_conn0 = time.time()
-        cap = cv2.VideoCapture(args.rtsp, cv2.CAP_FFMPEG)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        t_conn1 = time.time()
-        print(f"[阶段2] RTSP连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
+        # ---------- 视频源初始化 ----------
+        if args.mipi:
+            from mipi_camera import MIPICamera
+            t_conn0 = time.time()
+            cap = MIPICamera(sensor_id=args.sensor_id,
+                             width=args.width, height=args.height,
+                             fps=args.fps_cap)
+            t_conn1 = time.time()
+            print(f"[阶段2] MIPI 摄像头初始化: {(t_conn1 - t_conn0)*1000:.0f} ms")
+            source_label = "MIPI"
+        else:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+            t_conn0 = time.time()
+            cap = cv2.VideoCapture(args.rtsp, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            t_conn1 = time.time()
+            print(f"[阶段2] RTSP连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
+            source_label = "RTSP"
         if not cap.isOpened():
             print("无法连接")
             return
@@ -436,14 +495,17 @@ def main():
         t = threading.Thread(target=recognize_loop, daemon=True)
         t.start()
         mode_str = "FAST" if use_fast else "FULL"
-        print(f"实时识别中 [{mode_str}]... p=暂停/继续  f=切换快速/全量  q=退出")
+        print(f"实时识别中 [{source_label}] [{mode_str}]... p=暂停/继续  f=切换快速/全量  q=退出")
         paused = False
         first_frame = True
+        fps_counter = FPSCounter(window_size=30)
 
         while True:
+            t_frame_start = time.time()
             ret, frame = cap.read()
             if not ret:
                 continue
+            capture_latency_ms = (time.time() - t_frame_start) * 1000
 
             if first_frame:
                 t_first_frame[0] = time.time()
@@ -460,8 +522,10 @@ def main():
                 results = latest_results[0]
                 timing = latest_results[1]
 
-            status = ("FAST" if use_fast else "FULL") + (" PAUSED" if paused else "")
-            display = draw_results(frame, results, timing, status)
+            current_fps = fps_counter.tick()
+            status = f"{source_label} " + ("FAST" if use_fast else "FULL") + (" PAUSED" if paused else "")
+            display = draw_results(frame, results, timing, status,
+                                   fps=current_fps, latency_ms=capture_latency_ms)
 
             # 写入录像（带识别框的画面）
             if writer is not None:
