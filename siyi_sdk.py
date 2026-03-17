@@ -115,3 +115,14 @@ class SIYIA8mini:
 
     def close(self):
         self.sock.close()
+
+    def gimbal_rotate(self, yaw_speed, pitch_speed):
+        """
+        云台速率控制 (CMD 0x07)
+        yaw_speed: -100~100 (负=左, 正=右)
+        pitch_speed: -100~100 (负=下, 正=上)
+        """
+        yaw_speed = max(-100, min(100, int(yaw_speed)))
+        pitch_speed = max(-100, min(100, int(pitch_speed)))
+        data = struct.pack('bb', yaw_speed, pitch_speed)
+        return self._send(0x07, data)
