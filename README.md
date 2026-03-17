@@ -29,25 +29,67 @@ python target_server.py
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
+| GET | `/` | 目标管理 HTML 页面（缩略图+上传+删除+权重调整） |
 | GET | `/api/targets` | 获取当前目标列表 |
-| POST | `/api/targets/upload` | 上传新目标图片 (multipart, field="image") |
+| POST | `/api/targets/upload` | 上传新目标图片 (multipart, field="image", 可选 weight/min_confidence) |
 | POST | `/api/targets/reload` | 触发重新加载 |
+| PUT | `/api/targets/<name>` | 更新目标权重和最低置信度 |
 | DELETE | `/api/targets/<name>` | 删除某个目标 |
+| GET | `/api/targets/<name>/preview` | 获取目标模板缩略图 |
+| GET | `/api/events` | SSE 实时事件流（识别结果+重载通知） |
 
 示例：
 ```bash
 # 查看目标列表
 curl http://localhost:5000/api/targets
 
-# 上传新目标
-curl -X POST -F "image=@new_target.jpg" http://localhost:5000/api/targets/upload
+# 上传新目标（带权重和最低置信度）
+curl -X POST -F "image=@new_target.jpg" -F "weight=1.5" -F "min_confidence=0.6" \
+     http://localhost:5000/api/targets/upload
+
+# 更新目标权重
+curl -X PUT -H "Content-Type: application/json" \
+     -d '{"weight": 2.0, "min_confidence": 0.5}' \
+     http://localhost:5000/api/targets/target_000.jpg
 
 # 手动触发重载
 curl -X POST http://localhost:5000/api/targets/reload
 
 # 删除目标
 curl -X DELETE http://localhost:5000/api/targets/target_003.jpg
+
+# 监听 SSE 实时事件
+curl http://localhost:5000/api/events
+
+# 浏览器打开管理页面
+# http://localhost:5000/
 ```
+
+### 目标置信度权重系统
+
+每个目标模板可以独立设置权重和最低置信度阈值：
+
+```json
+{
+  "source": "zoom_1x.jpg",
+  "crop": "target_000.jpg",
+  "bbox": [100, 200, 300, 400],
+  "image_size": [1280, 720],
+  "weight": 1.5,
+  "min_confidence": 0.6
+}
+```
+
+- **weight** (默认 1.0): 最终得分乘以此权重，用于提高/降低特定目标的优先级
+- **min_confidence** (默认 0.45): 颜色验证阶段的最低置信度阈值
+
+### WebSocket 实时通知 (SSE)
+
+通过 Server-Sent Events 推送实时事件，无需额外依赖：
+
+- **detection**: 每帧最佳识别结果 (score, method, bbox)
+- **reload**: 目标模板重载通知 (added, removed, count)
+- **heartbeat**: 30秒无事件时发送心跳保持连接
 
 ### 实时视频标注 (annotate_live.py)
 
