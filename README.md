@@ -9,7 +9,7 @@
 - **统一视频源接口**: `--source mipi|rtsp` 参数一键切换，RTSP 模式完全保留
 - **实时 FPS 显示**: 画面左上角显示实际采集帧率
 - **变焦拍摄工具也支持 MIPI**: `capture_zoom.py --source mipi` 直接 MIPI 取帧 + UDP 变焦
-- **MIPICamera 模块**: 独立的 `mipi_camera.py`，支持曝光/增益参数调节，提供 `create_capture()` 工厂函数
+- **MIPICamera 模块**: 独立的 `mipi_camera.py`，支持曝光/增益参数调节，接口兼容 cv2.VideoCapture
 
 ## 技术方案
 
@@ -81,17 +81,17 @@ python annotate.py
 ### 3. 实时识别
 
 ```bash
-# MIPI 快速模式 (默认，推荐)
-python recognize.py --fast
+# MIPI 快速模式 (推荐)
+python recognize.py --mipi --fast
 
 # MIPI 全量模式
-python recognize.py
+python recognize.py --mipi
 
 # RTSP 快速模式
-python recognize.py --source rtsp --fast
+python recognize.py --rtsp rtsp://192.168.144.25:8554/main.264 --fast
 
 # RTSP 全量模式
-python recognize.py --source rtsp
+python recognize.py --rtsp rtsp://192.168.144.25:8554/main.264
 
 # 带录像保存
 python recognize.py --fast --save
@@ -112,11 +112,14 @@ python recognize.py --image captures/zoom_1x.jpg
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--source mipi\|rtsp` | `mipi` | 视频源选择 |
-| `--mipi` | 开启 | 等同于 `--source mipi` |
+| `--mipi` | 关闭 | 使用 MIPI CSI 摄像头 (低延迟) |
+| `--sensor-id N` | `0` | MIPI 摄像头编号 |
+| `--width N` | `1280` | MIPI 采集宽度 |
+| `--height N` | `720` | MIPI 采集高度 |
+| `--fps-cap N` | `30` | MIPI 采集帧率 |
 | `--fast` | 关闭 | 快速识别模式 (ORB+颜色, ~29ms) |
 | `--save` | 关闭 | 录像保存到 `recordings/` |
-| `--rtsp URL` | `rtsp://192.168.144.25:8554/main.264` | RTSP 地址 |
+| `--rtsp URL` | `rtsp://192.168.144.25:8554/main.264` | RTSP 视频流地址 |
 | `--batch` | - | 批量测试 `captures/` 下所有图片 |
 | `--image PATH` | - | 单张图片测试 |
 
@@ -153,6 +156,13 @@ numpy
 ## 为什么不用 YOLO
 
 本系统识别的是**特定个体目标**（拿到照片后找这个具体的东西），而非物体类别。YOLO 需要大量标注数据训练且只能识别类别，无法满足"临时换目标、秒切"的需求。传统视觉方案在本场景中更合适：换目标只需几张照片，无需训练，29ms 即可完成识别。
+
+## Jetson 环境要求
+
+- JetPack 5.x 或更高版本
+- OpenCV 编译时开启 GStreamer 支持 (`-D WITH_GSTREAMER=ON`)
+- `nvarguscamerasrc` 可用 (检查: `gst-inspect-1.0 nvarguscamerasrc`)
+- CSI 排线正确连接 (建议先用 `nvgstcapture-1.0` 测试)
 
 ## 为什么用 MIPI 替代 RTSP
 
