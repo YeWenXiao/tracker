@@ -30,6 +30,8 @@ import json
 import time
 import threading
 import functools
+import platform
+from collections import defaultdict
 import cv2
 import numpy as np
 from flask import Flask, request, jsonify, send_file, Response
@@ -37,6 +39,34 @@ from flask import Flask, request, jsonify, send_file, Response
 from target_history import TargetHistory
 
 app = Flask(__name__)
+
+class RateLimiter:
+    """简单的内存限流器"""
+
+    def __init__(self, max_requests=30, window_seconds=60):
+        self.max_requests = max_requests
+        self.window = window_seconds
+        self.requests = defaultdict(list)  # ip -> [timestamps]
+
+    def is_allowed(self, client_ip):
+        now = time.time()
+        # 清理过期记录
+        self.requests[client_ip] = [
+            t for t in self.requests[client_ip]
+            if now - t < self.window
+        ]
+        if len(self.requests[client_ip]) >= self.max_requests:
+            return False
+        self.requests[client_ip].append(now)
+        return True
+
+
+rate_limiter = RateLimiter(max_requests=30, window_seconds=60)
+upload_limiter = RateLimiter(max_requests=10, window_seconds=60)
+
+_start_time = time.time()
+
+
 
 TARGETS_DIR = os.environ.get("TARGETS_DIR", "targets")
 INFO_FILE = "target_info.json"
@@ -46,6 +76,15 @@ _target_history = TargetHistory()
 
 
 # ==================== 统一错误处理 ====================
+
+@app.before_request
+def check_rate_limit():
+    """全局限流检查"""
+    client_ip = request.remote_addr
+    if not rate_limiter.is_allowed(client_ip):
+        return jsonify({"error": "请求过于频繁，请稍后再试", "status": 429}), 429
+
+
 
 def error_response(message, status_code, details=None):
     """统一错误响应格式"""
@@ -408,6 +447,11 @@ def list_targets():
 @app.route("/api/targets/upload", methods=["POST"])
 @require_auth
 def upload_target():
+    # 上传接口更严格的限流
+    client_ip = request.remote_addr
+    if not upload_limiter.is_allowed(client_ip):
+        return error_response("上传请求过于频繁，请稍后再试", 429)
+
     if "image" not in request.files:
         return error_response("请求中未包含图片文件", 400)
 
