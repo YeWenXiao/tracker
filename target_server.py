@@ -27,6 +27,8 @@ API:
 import os
 import json
 import time
+import cv2
+import numpy as np
 from flask import Flask, request, jsonify, send_file, Response
 
 from target_history import TargetHistory
@@ -93,6 +95,11 @@ def index():
             font-family: monospace; font-size: 12px; margin-top: 20px; }
   .events .event { padding: 2px 0; color: #0f0; }
   .weight-input { width: 50px; background: #222; color: #fff; border: 1px solid #444; border-radius: 3px; text-align: center; }
+  .stats-panel { background: #16213e; padding: 16px; border-radius: 8px; margin: 20px 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .stat-item { text-align: center; }
+  .stat-item .value { font-size: 24px; color: #0ff; font-weight: bold; }
+  .stat-item .label { font-size: 12px; color: #888; margin-top: 4px; }
+  .similarity-warning { background: #e74c3c33; border: 1px solid #e74c3c; padding: 8px 12px; border-radius: 4px; margin: 8px 0; color: #e74c3c; }
 </style>
 </head>
 <body>
@@ -108,8 +115,18 @@ def index():
   </form>
 </div>
 
+<h3>识别统计</h3>
+<div class="stats-panel" id="statsPanel">
+  <div class="stat-item"><div class="value" id="statFrames">-</div><div class="label">处理帧数</div></div>
+  <div class="stat-item"><div class="value" id="statAvgTime">-</div><div class="label">平均耗时(ms)</div></div>
+  <div class="stat-item"><div class="value" id="statDetRate">-</div><div class="label">检测率</div></div>
+  <div class="stat-item"><div class="value" id="statTargets">-</div><div class="label">目标数量</div></div>
+  <div class="stat-item"><div class="value" id="statThreshold">-</div><div class="label">自适应阈值</div></div>
+</div>
+
 <button class="btn btn-reload" onclick="reloadTargets()">重新加载模板</button>
 <span id="status"></span>
+<div id="similarityWarning"></div>
 
 <div class="targets" id="targetList"></div>
 
@@ -177,20 +194,49 @@ document.getElementById('uploadForm').addEventListener('submit', function(e) {
   fd.append('min_confidence', document.getElementById('uploadMinConf').value);
   fetch('/api/targets/upload', {method: 'POST', body: fd}).then(r => r.json()).then(d => {
     document.getElementById('status').textContent = d.message;
+    const warnDiv = document.getElementById('similarityWarning');
+    if (d.warning) {
+      warnDiv.innerHTML = '<div class="similarity-warning">&#9888; ' + d.warning + '</div>';
+    } else {
+      warnDiv.innerHTML = '';
+    }
+    if (d.similar_targets && d.similar_targets.length > 0) {
+      let html = '<div style="font-size:12px;color:#888;margin:4px 0;">相似目标: ';
+      d.similar_targets.forEach(t => { html += t.name + '(' + (t.score * 100).toFixed(0) + '%) '; });
+      html += '</div>';
+      warnDiv.innerHTML += html;
+    }
     loadTargets();
   });
 });
 
-// SSE 事件流
+// SSE 事件流 + 多客户端状态同步
 var evtLog = document.getElementById('eventLog');
 var evtSource = new EventSource('/api/events');
 evtSource.onmessage = function(e) {
+  var data = JSON.parse(e.data);
+  if (data.type === 'reload' || data.type === 'targets_changed') {
+    loadTargets();
+  }
   var div = document.createElement('div');
   div.className = 'event';
-  div.textContent = e.data;
+  var ts = data.time ? new Date(data.time * 1000).toLocaleTimeString() : '';
+  div.textContent = ts + ' [' + data.type + '] ' + JSON.stringify(data);
   evtLog.prepend(div);
   while (evtLog.children.length > 100) evtLog.removeChild(evtLog.lastChild);
 };
+
+function updateStats() {
+  fetch('/api/stats').then(function(r) { return r.json(); }).then(function(s) {
+    document.getElementById('statFrames').textContent = s.total_frames || 0;
+    document.getElementById('statAvgTime').textContent = s.avg_time_ms ? s.avg_time_ms.toFixed(1) : '-';
+    document.getElementById('statDetRate').textContent = s.detection_rate ? (s.detection_rate * 100).toFixed(1) + '%' : '-';
+    document.getElementById('statTargets').textContent = s.target_count || 0;
+    document.getElementById('statThreshold').textContent = s.adaptive_threshold || '-';
+  }).catch(function() {});
+}
+setInterval(updateStats, 5000);
+updateStats();
 
 loadTargets();
 </script>
@@ -231,6 +277,17 @@ def upload_target():
 
     file.save(save_path)
 
+    # 检查与已有目标的相似度
+    warning = None
+    similar_targets = []
+    if _recognizer:
+        img = cv2.imread(save_path)
+        if img is not None:
+            sims = _recognizer.check_similarity(img)
+            similar_targets = [{"name": n, "score": round(s, 4)} for n, s in sims[:3]]
+            if sims and sims[0][1] > 0.8:
+                warning = f"与 {sims[0][0]} 相似度 {sims[0][1]:.2f}"
+
     # 读取可选的 weight 和 min_confidence 参数
     weight = float(request.form.get("weight", 1.0))
     min_confidence = float(request.form.get("min_confidence", 0.45))
@@ -249,8 +306,47 @@ def upload_target():
     if _recognizer is not None:
         _recognizer.reload_targets()
 
-    return jsonify({"message": f"已上传 {crop_name}", "crop": crop_name}), 201
+    # 推送 SSE targets_changed 事件
+    try:
+        from recognize import push_event
+        push_event({"type": "targets_changed", "action": "upload", "target": crop_name, "time": time.time()})
+    except ImportError:
+        pass
 
+    result = {"message": f"已上传 {crop_name}", "crop": crop_name}
+    if warning:
+        result["warning"] = warning
+    if similar_targets:
+        result["similar_targets"] = similar_targets
+    return jsonify(result), 201
+
+
+
+
+@app.route("/api/targets/check-similarity", methods=["POST"])
+def check_similarity():
+    """上传图片检查与已有目标的相似度（不保存）"""
+    if "image" not in request.files:
+        return jsonify({"error": "No image file in request"}), 400
+
+    if _recognizer is None:
+        return jsonify({"error": "识别引擎未初始化"}), 503
+
+    file = request.files["image"]
+    file_bytes = np.frombuffer(file.read(), np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if img is None:
+        return jsonify({"error": "无法解析图片"}), 400
+
+    sims = _recognizer.check_similarity(img)
+    results = [{"name": n, "score": round(s, 4)} for n, s in sims]
+    is_duplicate = bool(sims and sims[0][1] > 0.8)
+
+    return jsonify({
+        "similarities": results,
+        "is_duplicate": is_duplicate,
+        "threshold": 0.8,
+    })
 
 @app.route("/api/targets/reload", methods=["POST"])
 def reload_targets():
@@ -318,8 +414,30 @@ def delete_target(name):
     if _recognizer is not None:
         _recognizer.reload_targets()
 
+    # 推送 SSE targets_changed 事件
+    try:
+        from recognize import push_event
+        push_event({"type": "targets_changed", "action": "delete", "target": name, "time": time.time()})
+    except ImportError:
+        pass
+
     return jsonify({"message": f"已删除 {name}", "remaining": len(annotations)})
 
+
+
+
+@app.route("/api/stats", methods=["GET"])
+def get_stats():
+    """获取识别统计数据"""
+    try:
+        from recognize import recognition_history
+        stats = recognition_history.stats()
+        stats["target_count"] = len(_recognizer.targets) if _recognizer else 0
+        if _recognizer:
+            stats["adaptive_threshold"] = round(_recognizer.adaptive_threshold.get(), 4)
+        return jsonify(stats)
+    except ImportError:
+        return jsonify({"error": "recognize 模块不可用"}), 503
 
 @app.route("/api/targets/<name>/preview", methods=["GET"])
 def preview_target(name):

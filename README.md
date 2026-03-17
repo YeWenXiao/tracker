@@ -6,6 +6,13 @@
 
 **核心改进：** 识别引擎运行过程中，无需停止视频流即可更换识别目标。
 
+### Round 5 新增
+
+- **目标相似度去重：** 上传新目标时自动检测与已有目标的相似度（颜色直方图+ORB特征），防止重复添加。相似度>80%时发出警告。新增 `POST /api/targets/check-similarity` 接口支持仅检查不保存。
+- **识别置信度自适应：** `AdaptiveThreshold` 根据最近200帧识别得分自动调整阈值（平均得分的70%，平滑更新），OSD 实时显示当前阈值。目标自定义的 `min_confidence` 优先级高于自适应值。
+- **管理页面增强：** SSE 推送 `targets_changed` 事件实现多客户端自动同步；识别统计面板每5秒刷新；上传时显示相似度警告。
+- **统计 API：** `GET /api/stats` 返回识别统计数据和自适应阈值。
+
 ### 热加载机制
 
 - **增量加载：** 只计算新增模板的特征，保留未变化模板的缓存，避免全量重算
@@ -31,7 +38,8 @@ python target_server.py
 |------|------|------|
 | GET | `/` | 目标管理 HTML 页面（缩略图+上传+删除+权重调整） |
 | GET | `/api/targets` | 获取当前目标列表 |
-| POST | `/api/targets/upload` | 上传新目标图片 (multipart, field="image", 可选 weight/min_confidence) |
+| POST | `/api/targets/upload` | 上传新目标图片 (含相似度去重检测, 可选 weight/min_confidence) |
+| POST | `/api/targets/check-similarity` | 上传图片检查相似度（不保存） |
 | POST | `/api/targets/reload` | 触发重新加载 |
 | PUT | `/api/targets/<name>` | 更新目标权重和最低置信度 |
 | DELETE | `/api/targets/<name>` | 删除某个目标 |
@@ -42,7 +50,7 @@ python target_server.py
 | POST | `/api/history/rollback` | 回滚到指定快照 |
 | GET | `/api/history/detections` | 最近N次识别结果 |
 | GET | `/api/stats` | 识别统计信息 |
-| GET | `/api/events` | SSE 实时事件流（识别结果+重载通知） |
+| GET | `/api/events` | SSE 实时事件流（识别结果+重载通知+targets_changed） |
 
 示例：
 ```bash

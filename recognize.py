@@ -86,6 +86,37 @@ class RecognitionHistory:
         }
 
 
+
+class AdaptiveThreshold:
+    """自适应置信度阈值"""
+
+    def __init__(self, initial=0.45, min_val=0.3, max_val=0.7):
+        self.threshold = initial
+        self.min_val = min_val
+        self.max_val = max_val
+        self.history_scores = []  # 最近的得分
+
+    def update(self, scores):
+        """根据最近的识别得分更新阈值"""
+        self.history_scores.extend(scores)
+        # 保留最近200个得分
+        if len(self.history_scores) > 200:
+            self.history_scores = self.history_scores[-200:]
+
+        if len(self.history_scores) < 20:
+            return  # 样本不够，不调整
+
+        # 策略：阈值 = 平均得分的 70%
+        avg = np.mean(self.history_scores)
+        new_threshold = np.clip(avg * 0.7, self.min_val, self.max_val)
+
+        # 平滑更新（避免跳变）
+        self.threshold = 0.9 * self.threshold + 0.1 * new_threshold
+
+    def get(self):
+        return self.threshold
+
+
 # 全局识别历史实例
 recognition_history = RecognitionHistory()
 
@@ -99,6 +130,7 @@ class TargetRecognizer:
         self.orb = cv2.ORB_create(nfeatures=2000)
         self.sift = cv2.SIFT_create(nfeatures=1000)
         self.bf_hamming = cv2.BFMatcher(cv2.NORM_HAMMING)
+        self.adaptive_threshold = AdaptiveThreshold()
         # SIFT 用 FLANN 匹配器
         index_params = dict(algorithm=1, trees=5)  # FLANN_INDEX_KDTREE
         search_params = dict(checks=50)
@@ -225,6 +257,35 @@ class TargetRecognizer:
             })
         except Exception as e:
             print(f"[热加载] 失败: {e}")
+    def check_similarity(self, new_image):
+        """
+        检查新图片与已有目标的相似度
+        返回: [(target_name, similarity_score), ...] 按相似度降序
+        """
+        new_gray = cv2.cvtColor(new_image, cv2.COLOR_BGR2GRAY)
+        new_hsv = cv2.cvtColor(new_image, cv2.COLOR_BGR2HSV)
+        new_hist = cv2.calcHist([new_hsv], [0, 1], None, [30, 32], [0, 180, 0, 256])
+        cv2.normalize(new_hist, new_hist)
+
+        similarities = []
+        for t in self.targets:
+            # 颜色直方图相似度
+            color_sim = cv2.compareHist(t["hist_hs"], new_hist, cv2.HISTCMP_CORREL)
+
+            # ORB 特征匹配相似度
+            orb_kp, orb_des = self.orb.detectAndCompute(new_gray, None)
+            feature_sim = 0.0
+            if orb_des is not None and t["orb_des"] is not None:
+                matches = self.bf_hamming.knnMatch(orb_des, t["orb_des"], k=2)
+                good = [m for m, n in matches if len([m, n]) == 2 and m.distance < 0.7 * n.distance]
+                feature_sim = len(good) / max(len(orb_des), 1)
+
+            combined = 0.5 * max(color_sim, 0) + 0.5 * feature_sim
+            similarities.append((t["name"], combined))
+
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        return similarities
+
     def recognize(self, scene_bgr, fast=False):
         """
         在场景中识别目标
@@ -393,8 +454,9 @@ class TargetRecognizer:
                 if cs > best_color_score:
                     best_color_score = cs
                     best_target = t
-            # 使用最佳匹配目标的 min_confidence 和 weight
-            min_conf = best_target.get("min_confidence", 0.45) if best_target else 0.45
+            # 使用目标自定义 min_confidence，否则用自适应阈值
+            custom_conf = best_target.get("min_confidence", None) if best_target else None
+            min_conf = custom_conf if custom_conf is not None else self.adaptive_threshold.get()
             weight = best_target.get("weight", 1.0) if best_target else 1.0
             combined = 0.4 * score + 0.6 * max(best_color_score, 0)
             if combined >= min_conf:
@@ -405,6 +467,10 @@ class TargetRecognizer:
         verified.sort(key=lambda r: r[0], reverse=True)
         timing["nms_verify"] = time.time() - t0
         timing["total"] = sum(timing.values())
+
+        # 更新自适应阈值（用本帧所有候选的得分）
+        if verified:
+            self.adaptive_threshold.update([s for s, *_ in verified])
 
         return verified[:5], timing
 
@@ -481,6 +547,10 @@ def draw_results(img, results, timing=None, label="", recognizer=None):
         target_text = f"目标: {n_targets}"
         cv2.putText(display, target_text, (disp_w - 200, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        # 显示自适应阈值
+        adapt_text = f"Thresh: {recognizer.adaptive_threshold.get():.3f}"
+        cv2.putText(display, adapt_text, (disp_w - 200, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
         if recognizer._last_reload_time is not None:
             from datetime import datetime
             t_str = datetime.fromtimestamp(recognizer._last_reload_time).strftime("%H:%M:%S")
