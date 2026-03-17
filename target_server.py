@@ -69,6 +69,7 @@ _start_time = time.time()
 
 
 TARGETS_DIR = os.environ.get("TARGETS_DIR", "targets")
+CACHE_DIR = ".feature_cache"
 INFO_FILE = "target_info.json"
 
 _recognizer = None
@@ -897,6 +898,55 @@ def generate_report():
         return Response(html, mimetype="text/html")
     else:
         return jsonify(report)
+
+
+# ==================== 健康检查 ====================
+
+@app.route("/api/health", methods=["GET"])
+def health_check():
+    """健康检查"""
+    uptime = time.time() - _start_time
+
+    health = {
+        "status": "healthy",
+        "uptime_seconds": round(uptime),
+        "uptime_human": f"{int(uptime//3600)}h {int(uptime%3600//60)}m",
+        "python_version": platform.python_version(),
+        "opencv_version": cv2.__version__,
+        "targets_loaded": len(_recognizer.targets) if _recognizer else 0,
+        "active_group": _recognizer._active_group if _recognizer and hasattr(_recognizer, '_active_group') else "全部",
+        "feature_cache_enabled": os.path.exists(CACHE_DIR),
+    }
+
+    # 检查关键组件
+    checks = []
+
+    # 目标目录
+    if os.path.exists(TARGETS_DIR):
+        checks.append({"name": "目标目录", "status": "ok"})
+    else:
+        checks.append({"name": "目标目录", "status": "error", "message": "目录不存在"})
+        health["status"] = "degraded"
+
+    # target_info.json
+    info_path = os.path.join(TARGETS_DIR, "target_info.json")
+    if os.path.exists(info_path):
+        checks.append({"name": "目标配置", "status": "ok"})
+    else:
+        checks.append({"name": "目标配置", "status": "error"})
+        health["status"] = "degraded"
+
+    # 识别器
+    if _recognizer:
+        checks.append({"name": "识别器", "status": "ok"})
+    else:
+        checks.append({"name": "识别器", "status": "warning", "message": "未连接"})
+
+    health["checks"] = checks
+
+    status_code = 200 if health["status"] == "healthy" else 503
+    return jsonify(health), status_code
+
 
 
 # ==================== SSE 事件流 ====================
