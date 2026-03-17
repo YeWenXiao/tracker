@@ -37,6 +37,12 @@ class TargetRecognizer:
         index_params = dict(algorithm=1, trees=5)  # FLANN_INDEX_KDTREE
         search_params = dict(checks=50)
         self.flann = cv2.FlannBasedMatcher(index_params, search_params)
+        # CUDA 加速检测
+        self.use_cuda = hasattr(cv2, 'cuda') and cv2.cuda.getCudaEnabledDeviceCount() > 0
+        if self.use_cuda:
+            print('[CUDA] GPU 加速已启用 (cvtColor/resize)')
+        else:
+            print('[CUDA] GPU 不可用, 使用 CPU 模式')
         self._load(targets_dir)
 
     def _load(self, targets_dir):
@@ -86,8 +92,16 @@ class TargetRecognizer:
         返回: results_list, timing_dict
         """
         scene_h, scene_w = scene_bgr.shape[:2]
-        scene_gray = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2GRAY)
-        scene_hsv = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2HSV)
+        if self.use_cuda:
+            gpu_frame = cv2.cuda_GpuMat()
+            gpu_frame.upload(scene_bgr)
+            gpu_gray = cv2.cuda.cvtColor(gpu_frame, cv2.COLOR_BGR2GRAY)
+            scene_gray = gpu_gray.download()
+            gpu_hsv = cv2.cuda.cvtColor(gpu_frame, cv2.COLOR_BGR2HSV)
+            scene_hsv = gpu_hsv.download()
+        else:
+            scene_gray = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2GRAY)
+            scene_hsv = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2HSV)
         timing = {}
         all_results = []
 
@@ -101,7 +115,13 @@ class TargetRecognizer:
         if fast:
             # 快速模式: 场景缩小到1/3，减少尺度数
             ds = 1.0 / 3
-            scene_small = cv2.resize(scene_gray, None, fx=ds, fy=ds)
+            if self.use_cuda:
+                gpu_gray = cv2.cuda_GpuMat()
+                gpu_gray.upload(scene_gray)
+                gpu_small = cv2.cuda.resize(gpu_gray, (int(scene_gray.shape[1]*ds), int(scene_gray.shape[0]*ds)))
+                scene_small = gpu_small.download()
+            else:
+                scene_small = cv2.resize(scene_gray, None, fx=ds, fy=ds)
             scales = np.arange(0.3, 1.5, 0.4)  # 3个尺度 vs 全量12个
         else:
             scene_small = scene_gray
