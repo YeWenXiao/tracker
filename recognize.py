@@ -134,12 +134,22 @@ class TargetRecognizer:
         """
         scene_h, scene_w = scene_bgr.shape[:2]
         if self.use_cuda:
-            gpu_frame = cv2.cuda_GpuMat()
-            gpu_frame.upload(scene_bgr)
-            gpu_gray = cv2.cuda.cvtColor(gpu_frame, cv2.COLOR_BGR2GRAY)
-            scene_gray = gpu_gray.download()
-            gpu_hsv = cv2.cuda.cvtColor(gpu_frame, cv2.COLOR_BGR2HSV)
-            scene_hsv = gpu_hsv.download()
+            try:
+                gpu_frame = cv2.cuda_GpuMat()
+                gpu_frame.upload(scene_bgr)
+                gpu_gray = cv2.cuda.cvtColor(gpu_frame, cv2.COLOR_BGR2GRAY)
+                scene_gray = gpu_gray.download()
+                gpu_hsv = cv2.cuda.cvtColor(gpu_frame, cv2.COLOR_BGR2HSV)
+                scene_hsv = gpu_hsv.download()
+            except cv2.error as e:
+                if 'out of memory' in str(e).lower() or 'insufficient' in str(e).lower():
+                    log.warning('CUDA 显存不足，切换到 CPU 模式')
+                    self.use_cuda = False
+                    self.cuda_template_matcher = None
+                    scene_gray = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2GRAY)
+                    scene_hsv = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2HSV)
+                else:
+                    raise
         else:
             scene_gray = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2GRAY)
             scene_hsv = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2HSV)
@@ -918,11 +928,38 @@ def main():
         first_frame = True
         fps_counter = FPSCounter(window_size=30)
 
+        reconnect_count = 0
+        max_reconnect = 5
+        consecutive_failures = 0
+
         while True:
             t_frame_start = time.time()
             ret, frame = cap.read()
             if not ret or frame is None:
+                consecutive_failures += 1
+                if consecutive_failures > 30:
+                    log.warning('视频流断开，尝试重连 (%d/%d)', reconnect_count + 1, max_reconnect)
+                    cap.release()
+                    time.sleep(1)
+                    try:
+                        if use_mipi:
+                            from mipi_camera import MIPICamera
+                            cap = MIPICamera(sensor_id=args.sensor_id,
+                                             width=args.width, height=args.height,
+                                             fps=args.fps_cap)
+                        else:
+                            cap = cv2.VideoCapture(args.rtsp_url, cv2.CAP_FFMPEG)
+                            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        reconnect_count += 1
+                        consecutive_failures = 0
+                        if reconnect_count >= max_reconnect:
+                            log.error('达到最大重连次数 (%d), 退出', max_reconnect)
+                            break
+                        log.info('重连成功 (%d/%d)', reconnect_count, max_reconnect)
+                    except Exception as e:
+                        log.error('重连失败: %s', e)
                 continue
+            consecutive_failures = 0
             capture_latency_ms = (time.time() - t_frame_start) * 1000
 
             if first_frame:

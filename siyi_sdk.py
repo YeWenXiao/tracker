@@ -86,15 +86,19 @@ class SIYIA8mini:
         data: uint8 整数部分 + uint8 小数部分
         SDK实例: 4.5x -> 55 66 01 02 00 01 00 0F 04 05 60 BB
         """
-        int_part = int(zoom_level)
-        float_part = int(round((zoom_level - int_part) * 10))
-        data = struct.pack('BB', int_part, float_part)
-        resp = self._send(0x0F, data)
-        if resp:
-            log.info("变焦: %.1fx (已应答)", zoom_level)
-        else:
-            log.warning("变焦: %.1fx (无应答)", zoom_level)
-        return resp
+        try:
+            int_part = int(zoom_level)
+            float_part = int(round((zoom_level - int_part) * 10))
+            data = struct.pack('BB', int_part, float_part)
+            resp = self._send(0x0F, data)
+            if resp:
+                log.info("变焦: %.1fx (已应答)", zoom_level)
+            else:
+                log.warning("变焦: %.1fx (无应答)", zoom_level)
+            return resp
+        except Exception as e:
+            log.warning('变焦指令失败: %s', e)
+            return None
 
     def get_zoom(self):
         """获取当前变焦倍数 (CMD 0x18)"""
@@ -122,7 +126,11 @@ class SIYIA8mini:
         yaw_speed: -100~100 (负=左, 正=右)
         pitch_speed: -100~100 (负=下, 正=上)
         """
-        yaw_speed = max(-100, min(100, int(yaw_speed)))
-        pitch_speed = max(-100, min(100, int(pitch_speed)))
-        data = struct.pack('bb', yaw_speed, pitch_speed)
-        return self._send(0x07, data)
+        try:
+            yaw_speed = max(-100, min(100, int(yaw_speed)))
+            pitch_speed = max(-100, min(100, int(pitch_speed)))
+            data = struct.pack('bb', yaw_speed, pitch_speed)
+            return self._send(0x07, data)
+        except Exception as e:
+            log.warning('云台旋转指令失败: %s', e)
+            return None
