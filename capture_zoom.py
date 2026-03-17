@@ -27,9 +27,11 @@ def main():
                         help="视频源: mipi (默认) 或 rtsp")
     parser.add_argument("--rtsp", default="rtsp://192.168.144.25:8554/main.264",
                         help="RTSP 地址 (仅 --source rtsp 时使用)")
+    parser.add_argument("--mipi", action="store_true",
+                        help="使用 MIPI CSI (等同于 --source mipi)")
     args = parser.parse_args()
 
-    use_mipi = (args.source == "mipi")
+    use_mipi = args.mipi or (args.source == "mipi")
     cam = SIYIA8mini()  # 云台控制 (变焦始终走 UDP)
 
     def send_zoom(level):
@@ -41,7 +43,9 @@ def main():
 
     if use_mipi:
         mipi_cam = MIPICamera(width=1280, height=720, fps=30)
-        mipi_cam.open()
+        if not mipi_cam.isOpened():
+            print("无法打开 MIPI 摄像头")
+            exit(1)
     else:
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
         cap = cv2.VideoCapture(args.rtsp, cv2.CAP_FFMPEG)
@@ -60,15 +64,12 @@ def main():
     print("操作:  +/= 放大  -/_ 缩小  空格=拍照  q=退出")
 
     while True:
-        # 取帧: MIPI 返回 frame|None, RTSP 返回 (ret, frame)
         if use_mipi:
-            frame = mipi_cam.read()
-            if frame is None:
-                continue
+            ret, frame = mipi_cam.read()
         else:
             ret, frame = cap.read()
-            if not ret:
-                continue
+        if not ret:
+            continue
 
         display = frame.copy()
         info = f"[{source_name}] Zoom: {ZOOM_LEVELS[zoom_idx]}x | Photos: {count}"
