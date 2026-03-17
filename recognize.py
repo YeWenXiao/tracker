@@ -529,31 +529,57 @@ class FPSCounter:
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--image", type=str, help="测试图片路径")
-    parser.add_argument("--batch", action="store_true", help="批量测试captures/下所有图片")
-    parser.add_argument("--fast", action="store_true", help="快速模式: 只用ORB+颜色 (~20ms)")
-    parser.add_argument("--save", action="store_true", help="保存识别视频到 recordings/")
-    parser.add_argument("--rtsp", action="store_true",
-                        help="使用 RTSP 视频源 (默认使用 MIPI CSI)")
-    parser.add_argument("--rtsp-url", default="rtsp://192.168.144.25:8554/main.264",
-                        help="RTSP 地址 (仅 --rtsp 时使用)")
-    parser.add_argument("--mipi", action="store_true",
-                        help="使用 MIPI CSI 摄像头 (默认已启用)")
-    parser.add_argument("--sensor-id", type=int, default=0,
-                        help="MIPI 摄像头编号 (默认0)")
-    parser.add_argument("--width", type=int, default=1280,
-                        help="MIPI 采集宽度 (默认1280)")
-    parser.add_argument("--height", type=int, default=720,
-                        help="MIPI 采集高度 (默认720)")
-    parser.add_argument("--fps-cap", type=int, default=30,
-                        help="MIPI 采集帧率 (默认30)")
-    parser.add_argument("--verbose", action="store_true",
-                        help="DEBUG 级别日志输出")
-    parser.add_argument("--log-file", type=str, default=None,
-                        help="日志输出到文件")
-    parser.add_argument("--auto-track", action="store_true",
-                        help="云台自动跟踪目标")
+    parser = argparse.ArgumentParser(
+        description="A8mini 目标识别追踪系统 v2.0",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python recognize.py --fast            # MIPI 快速模式
+  python recognize.py --rtsp            # RTSP 模式
+  python recognize.py --auto-track      # 云台自动跟踪
+  python recognize.py --fast --save     # 快速模式 + 录像
+  python recognize.py --batch           # 批量测试
+  python recognize.py --image x.jpg     # 单张测试
+""")
+
+    # 视频源参数组
+    source_group = parser.add_argument_group("视频源")
+    source_group.add_argument("--mipi", action="store_true",
+                              help="使用 MIPI CSI 摄像头 (默认已启用)")
+    source_group.add_argument("--rtsp", action="store_true",
+                              help="使用 RTSP 视频源")
+    source_group.add_argument("--rtsp-url", default="rtsp://192.168.144.25:8554/main.264",
+                              help="RTSP 地址 (默认: %(default)s)")
+    source_group.add_argument("--sensor-id", type=int, default=0,
+                              help="MIPI 摄像头编号 (默认: %(default)s)")
+    source_group.add_argument("--width", type=int, default=1280,
+                              help="MIPI 采集宽度 (默认: %(default)s)")
+    source_group.add_argument("--height", type=int, default=720,
+                              help="MIPI 采集高度 (默认: %(default)s)")
+    source_group.add_argument("--fps-cap", type=int, default=30,
+                              help="MIPI 采集帧率 (默认: %(default)s)")
+
+    # 识别参数组
+    recog_group = parser.add_argument_group("识别")
+    recog_group.add_argument("--image", type=str, help="单张测试图片路径")
+    recog_group.add_argument("--batch", action="store_true",
+                             help="批量测试 captures/ 下所有图片")
+    recog_group.add_argument("--fast", action="store_true",
+                             help="快速模式: 只用 ORB+颜色 (~20ms)")
+
+    # 追踪参数组
+    track_group = parser.add_argument_group("追踪")
+    track_group.add_argument("--auto-track", action="store_true",
+                             help="云台自动跟踪目标")
+
+    # 输出参数组
+    output_group = parser.add_argument_group("输出")
+    output_group.add_argument("--save", action="store_true",
+                              help="保存识别视频到 recordings/")
+    output_group.add_argument("--verbose", action="store_true",
+                              help="DEBUG 级别日志输出")
+    output_group.add_argument("--log-file", type=str, default=None,
+                              help="日志输出到文件")
     args = parser.parse_args()
 
     # 重新配置 logger (根据命令行参数)
