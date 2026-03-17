@@ -16,6 +16,8 @@
   python recognize.py --rtsp               # RTSP 实时 (备用)
   python recognize.py --rtsp --fast        # RTSP 快速模式
   python recognize.py --sensor-id 1        # 指定 MIPI 摄像头ID
+  python recognize.py --verbose            # DEBUG 级别日志
+  python recognize.py --log-file run.log   # 日志写入文件
 """
 
 import cv2
@@ -25,6 +27,11 @@ import json
 import argparse
 import time
 import glob
+import logging
+
+from logger import setup_logger
+
+log = setup_logger("tracker")
 
 
 def load_config(path="config.yaml"):
@@ -70,11 +77,11 @@ class TargetRecognizer:
             try:
                 self.cuda_template_matcher = cv2.cuda.createTemplateMatching(
                     cv2.CV_8U, cv2.TM_CCOEFF_NORMED)
-                print('[CUDA] GPU 加速已启用 (cvtColor/resize/templateMatch)')
+                log.info('CUDA GPU 加速已启用 (cvtColor/resize/templateMatch)')
             except Exception as e:
-                print(f'[CUDA] GPU 加速已启用 (cvtColor/resize), 模板匹配CUDA不可用: {e}')
+                log.info('CUDA GPU 加速已启用 (cvtColor/resize), 模板匹配CUDA不可用: %s', e)
         else:
-            print('[CUDA] GPU 不可用, 使用 CPU 模式')
+            log.info('CUDA GPU 不可用, 使用 CPU 模式')
         self._load(targets_dir)
 
     def _load(self, targets_dir):
@@ -114,7 +121,7 @@ class TargetRecognizer:
                 "hist_bp": hist_bp,
                 "edges": edges,
             })
-        print(f"已加载 {len(self.targets)} 个目标模板")
+        log.info("已加载 %d 个目标模板", len(self.targets))
 
     def recognize(self, scene_bgr, fast=False):
         """
@@ -196,6 +203,7 @@ class TargetRecognizer:
                     ow, oh = int(nw / ds), int(nh / ds)
                     template_results.append((max_val, ox, oy, ow, oh, "template"))
         timing["template"] = time.time() - t0
+        log.debug("模板匹配: %.0fms, %d 个候选", timing["template"]*1000, len(template_results))
         all_results.extend(template_results)
 
         # 快速模式: 模板高置信度命中时跳过后续方法
@@ -218,6 +226,7 @@ class TargetRecognizer:
                         if box:
                             orb_results.append(box)
             timing["orb"] = time.time() - t0
+            log.debug("ORB匹配: %.0fms, %d 个候选", timing["orb"]*1000, len(orb_results))
             all_results.extend(orb_results)
 
         if not fast:
@@ -238,6 +247,7 @@ class TargetRecognizer:
                             box = (box[0], box[1], box[2], box[3], box[4], "sift")
                             sift_results.append(box)
             timing["sift"] = time.time() - t0
+            log.debug("SIFT匹配: %.0fms, %d 个候选", timing["sift"]*1000, len(sift_results))
             all_results.extend(sift_results)
 
         # === 方法4: HSV 颜色反投影 ===
@@ -265,6 +275,7 @@ class TargetRecognizer:
                     score = min(area / (scene_w * scene_h * 0.05), 1.0)
                     bp_results.append((score, x, y, w, h, "color_bp"))
             timing["color_bp"] = time.time() - t0
+            log.debug("颜色反投影: %.0fms, %d 个候选", timing["color_bp"]*1000, len(bp_results))
             all_results.extend(bp_results)
 
         if not fast:
@@ -286,6 +297,7 @@ class TargetRecognizer:
                     if max_val > 0.35:
                         edge_results.append((max_val, max_loc[0], max_loc[1], nw, nh, "edge"))
             timing["edge"] = time.time() - t0
+            log.debug("边缘匹配: %.0fms, %d 个候选", timing["edge"]*1000, len(edge_results))
             all_results.extend(edge_results)
 
         # === NMS + 颜色验证 ===
@@ -314,6 +326,7 @@ class TargetRecognizer:
         verified.sort(key=lambda r: r[0], reverse=True)
         timing["nms_verify"] = time.time() - t0
         timing["total"] = sum(timing.values())
+        log.debug("总计: %.0fms, %d 个结果", timing["total"]*1000, len(verified))
 
         return verified[:5], timing
 
@@ -401,11 +414,11 @@ def draw_results(img, results, timing=None, label="", fps=None, latency_ms=None)
 
 def print_timing(timing):
     """打印分步耗时"""
-    print(f"  分步耗时:")
+    log.info("分步耗时:")
     for key in ["template", "orb", "sift", "color_bp", "edge", "nms_verify"]:
         if key in timing:
-            print(f"    {key:12s}: {timing[key]*1000:6.0f} ms")
-    print(f"    {'总计':12s}: {timing.get('total',0)*1000:6.0f} ms")
+            log.info("  %12s: %6.0f ms", key, timing[key]*1000)
+    log.info("  %12s: %6.0f ms", "总计", timing.get('total', 0)*1000)
 
 
 class FPSCounter:
@@ -449,7 +462,16 @@ def main():
                         help="MIPI 采集高度 (默认720)")
     parser.add_argument("--fps-cap", type=int, default=30,
                         help="MIPI 采集帧率 (默认30)")
+    parser.add_argument("--verbose", action="store_true",
+                        help="DEBUG 级别日志输出")
+    parser.add_argument("--log-file", type=str, default=None,
+                        help="日志输出到文件")
     args = parser.parse_args()
+
+    # 重新配置 logger (根据命令行参数)
+    global log
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log = setup_logger("tracker", level=log_level, log_file=args.log_file)
 
     # 加载配置文件 (命令行参数优先)
     cfg = load_config()
@@ -481,44 +503,44 @@ def main():
     t_start = time.time()
     rec = TargetRecognizer(targets_dir=targets_dir)
     t_load = time.time()
-    print(f"[阶段1] 模板加载+特征预计算: {(t_load - t_start)*1000:.0f} ms")
+    log.info("[阶段1] 模板加载+特征预计算: %.0f ms", (t_load - t_start)*1000)
 
     if args.batch:
         results_dir = "results"
         os.makedirs(results_dir, exist_ok=True)
         images = sorted(glob.glob("captures/*.jpg"))
         if not images:
-            print("captures/ 中没有图片")
+            log.warning("captures/ 中没有图片")
             return
-        print(f"批量测试 {len(images)} 张图片\n")
+        log.info("批量测试 %d 张图片", len(images))
         for img_path in images:
             img = cv2.imread(img_path)
             if img is None:
                 continue
             name = os.path.basename(img_path)
             results, timing = rec.recognize(img)
-            print(f"--- {name} ---")
+            log.info("--- %s ---", name)
             if results:
                 for score, x, y, w, h, method in results:
-                    print(f"  [{method:8s}] 得分={score:.3f} 位置=({x},{y}) 大小={w}x{h}")
+                    log.info("  [%8s] 得分=%.3f 位置=(%d,%d) 大小=%dx%d", method, score, x, y, w, h)
             else:
-                print("  未检测到目标")
+                log.info("  未检测到目标")
             print_timing(timing)
             display = draw_results(img, results, timing, name)
             save_path = os.path.join(results_dir, f"result_{name}")
             cv2.imwrite(save_path, display)
-            print(f"  保存: {save_path}\n")
-        print(f"所有结果已保存到 {results_dir}/")
+            log.info("  保存: %s", save_path)
+        log.info("所有结果已保存到 %s/", results_dir)
 
     elif args.image:
         img = cv2.imread(args.image)
         if img is None:
-            print(f"无法读取: {args.image}")
+            log.warning("无法读取: %s", args.image)
             return
         results, timing = rec.recognize(img)
-        print(f"找到 {len(results)} 个候选:")
+        log.info("找到 %d 个候选:", len(results))
         for score, x, y, w, h, method in results:
-            print(f"  [{method:8s}] 得分={score:.3f} 位置=({x},{y}) 大小={w}x{h}")
+            log.info("  [%8s] 得分=%.3f 位置=(%d,%d) 大小=%dx%d", method, score, x, y, w, h)
         print_timing(timing)
         display = draw_results(img, results, timing)
         cv2.imshow("Result", display)
@@ -538,10 +560,10 @@ def main():
             cap = cv2.VideoCapture(args.rtsp_url, cv2.CAP_FFMPEG)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             t_conn1 = time.time()
-            print(f"[阶段2] RTSP 连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
+            log.info("[阶段2] RTSP 连接建立: %.0f ms", (t_conn1 - t_conn0)*1000)
             source_label = "RTSP"
             if not cap.isOpened():
-                print("无法连接 RTSP")
+                log.warning("无法连接 RTSP")
                 return
         else:
             from mipi_camera import MIPICamera
@@ -555,23 +577,23 @@ def main():
                 else:
                     cap.release()
             except Exception as e:
-                print(f"[WARNING] MIPI 打开失败: {e}")
+                log.warning("MIPI 打开失败: %s", e)
 
             if mipi_ok:
                 t_conn1 = time.time()
-                print(f"[阶段2] MIPI CSI 连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
+                log.info("[阶段2] MIPI CSI 连接建立: %.0f ms", (t_conn1 - t_conn0)*1000)
                 source_label = "MIPI"
             else:
                 # 自动降级到 RTSP
-                print(f"[WARNING] MIPI 不可用, 自动降级到 RTSP: {args.rtsp_url}")
+                log.warning("MIPI 不可用, 自动降级到 RTSP: %s", args.rtsp_url)
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
                 cap = cv2.VideoCapture(args.rtsp_url, cv2.CAP_FFMPEG)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 t_conn1 = time.time()
-                print(f"[阶段2] RTSP 连接建立 (降级): {(t_conn1 - t_conn0)*1000:.0f} ms")
+                log.info("[阶段2] RTSP 连接建立 (降级): %.0f ms", (t_conn1 - t_conn0)*1000)
                 source_label = "RTSP(fallback)"
                 if not cap.isOpened():
-                    print("无法连接 RTSP, 退出")
+                    log.warning("无法连接 RTSP, 退出")
                     return
 
         # 录像初始化
@@ -584,7 +606,7 @@ def main():
             fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(save_path, fourcc, 25, (fw, fh))
-            print(f"录像保存到: {save_path}")
+            log.info("录像保存到: %s", save_path)
 
         # 共享状态
         lock = threading.Lock()
@@ -616,15 +638,15 @@ def main():
                     latest_results[1] = timing
                 if first_detect[0] and results:
                     t_found = time.time()
-                    print(f"[阶段4] 首次识别到目标: {(t_found - t_start)*1000:.0f} ms (从启动算起)")
-                    print(f"         识别耗时: {timing.get('total',0)*1000:.0f} ms")
-                    print(f"         找到 {len(results)} 个候选")
+                    log.info("[阶段4] 首次识别到目标: %.0f ms (从启动算起)", (t_found - t_start)*1000)
+                    log.info("         识别耗时: %.0f ms", timing.get("total", 0)*1000)
+                    log.info("         找到 %d 个候选", len(results))
                     first_detect[0] = False
 
         t = threading.Thread(target=recognize_loop, daemon=True)
         t.start()
         mode_str = "FAST" if use_fast else "FULL"
-        print(f"实时识别中 [{source_label}] [{mode_str}]... p=暂停/继续  f=切换快速/全量  q=退出")
+        log.info("实时识别中 [%s] [%s]... p=暂停  f=快速/全量  d=ROI  q=退出", source_label, mode_str)
         paused = False
         first_frame = True
         fps_counter = FPSCounter(window_size=30)
@@ -643,7 +665,7 @@ def main():
 
             if first_frame:
                 t_first_frame[0] = time.time()
-                print(f"[阶段3] 收到第一帧: {(t_first_frame[0] - t_start)*1000:.0f} ms (从启动算起)")
+                log.info("[阶段3] 收到第一帧: %.0f ms (从启动算起)", (t_first_frame[0] - t_start)*1000)
                 first_frame = False
 
             # 送最新帧给识别线程
@@ -676,16 +698,16 @@ def main():
                 break
             elif key == ord('p'):
                 paused = not paused
-                print("暂停" if paused else "继续")
+                log.info("暂停" if paused else "继续")
             elif key == ord('f'):
                 use_fast = not use_fast
-                print(f"切换到 {'快速(ORB+颜色)' if use_fast else '全量(5方法)'} 模式")
+                log.info("切换到 %s 模式", "快速(ORB+颜色)" if use_fast else "全量(5方法)")
 
         running[0] = False
         t.join(timeout=2)
         if writer is not None:
             writer.release()
-            print(f"录像已保存")
+            log.info("录像已保存")
         cap.release()
         cv2.destroyAllWindows()
 

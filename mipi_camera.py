@@ -16,6 +16,9 @@ MIPI CSI 视频采集模块 (Jetson 平台)
 
 import cv2
 import time
+import logging
+
+log = logging.getLogger("tracker.mipi")
 
 
 class MIPICamera:
@@ -68,18 +71,17 @@ class MIPICamera:
     def _open(self):
         """打开摄像头"""
         pipeline = self._build_pipeline()
-        print("[MIPICamera] GStreamer pipeline:")
-        print("  " + pipeline)
+        log.info("GStreamer pipeline:")
+        log.info("  %s", pipeline)
         self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
         if self.cap.isOpened():
             self._start_time = time.time()
             self._frame_count = 0
-            print("[MIPICamera] 已打开 MIPI CSI 摄像头 (sensor={}, {}x{}@{}fps)".format(
-                self.sensor_id, self.width, self.height, self.fps))
+            log.info("已打开 MIPI CSI 摄像头 (sensor=%d, %dx%d@%dfps)",
+                self.sensor_id, self.width, self.height, self.fps)
         else:
-            print("[MIPICamera] 警告: 无法打开 MIPI CSI 摄像头 (sensor_id={})".format(
-                self.sensor_id))
-            print("  请检查: 1) CSI排线 2) nvarguscamerasrc 3) OpenCV GStreamer支持")
+            log.warning("无法打开 MIPI CSI 摄像头 (sensor_id=%d)", self.sensor_id)
+            log.warning("  请检查: 1) CSI排线 2) nvarguscamerasrc 3) OpenCV GStreamer支持")
 
     def isOpened(self):
         """摄像头是否已打开 (兼容 cv2.VideoCapture)"""
@@ -126,7 +128,7 @@ class MIPICamera:
         if self.cap is not None:
             self.cap.release()
             self.cap = None
-            print("[MIPICamera] 已释放 (共采集 {} 帧)".format(self._frame_count))
+            log.info("已释放 MIPI (共采集 %d 帧)", self._frame_count)
 
     def __enter__(self):
         return self
@@ -155,7 +157,7 @@ def create_capture(source="mipi", rtsp_url="rtsp://192.168.144.25:8554/main.264"
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
             raise RuntimeError("无法连接 RTSP: " + rtsp_url)
-        print("[RTSP] 已连接: " + rtsp_url)
+        log.info("RTSP 已连接: %s", rtsp_url)
         return cap
     else:
         raise ValueError("未知视频源: {}, 支持 'mipi' 或 'rtsp'".format(source))

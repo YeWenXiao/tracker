@@ -6,6 +6,9 @@ SIYI A8mini 控制SDK
 import socket
 import struct
 import time
+import logging
+
+log = logging.getLogger("tracker.siyi")
 
 
 class SIYIA8mini:
@@ -88,9 +91,9 @@ class SIYIA8mini:
         data = struct.pack('BB', int_part, float_part)
         resp = self._send(0x0F, data)
         if resp:
-            print(f"变焦: {zoom_level}x (已应答)")
+            log.info("变焦: %.1fx (已应答)", zoom_level)
         else:
-            print(f"变焦: {zoom_level}x (无应答)")
+            log.warning("变焦: %.1fx (无应答)", zoom_level)
         return resp
 
     def get_zoom(self):
@@ -99,7 +102,7 @@ class SIYIA8mini:
         if resp and len(resp) >= 10:
             # 打印原始应答帮助调试
             hex_str = ' '.join(f'{b:02x}' for b in resp)
-            print(f"  get_zoom 原始应答: {hex_str}")
+            log.debug("get_zoom 原始应答: %s", hex_str)
             # ACK格式: STX(2)+CTRL(1)+DataLen(2)+SEQ(2)+CMD_ID(1)+DATA+CRC(2)
             # DATA位于第8字节开始: zoom_int(1) + zoom_float(1)
             try:
