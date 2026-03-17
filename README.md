@@ -1,6 +1,70 @@
-# A8mini Target Tracker v1.0
+# A8mini Target Tracker v1.5
 
 基于 SIYI A8mini 云台相机的目标图像学习识别系统。通过少量目标模板照片，在 RTSP 视频流中实时识别特定目标，无需训练神经网络。
+
+## v1.5 新功能: 不停流热更换识别目标
+
+**核心改进：** 识别引擎运行过程中，无需停止视频流即可更换识别目标。
+
+### 热加载机制
+
+- **手动触发：** 识别界面按 `r` 键立即重载 targets/ 目录
+- **自动监控：** 后台线程每 2 秒检查 `targets/target_info.json` 的修改时间，变化时自动重载
+- **HTTP API：** 通过 REST API 远程管理目标模板
+- **线程安全：** 使用 Python GIL 原子赋值，识别线程不会因重载而崩溃
+
+### HTTP API (target_server.py)
+
+独立启动：
+```bash
+python target_server.py
+```
+
+或作为 recognize.py 的子线程（需代码集成）。端口 5000。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/targets` | 获取当前目标列表 |
+| POST | `/api/targets/upload` | 上传新目标图片 (multipart, field="image") |
+| POST | `/api/targets/reload` | 触发重新加载 |
+| DELETE | `/api/targets/<name>` | 删除某个目标 |
+
+示例：
+```bash
+# 查看目标列表
+curl http://localhost:5000/api/targets
+
+# 上传新目标
+curl -X POST -F "image=@new_target.jpg" http://localhost:5000/api/targets/upload
+
+# 手动触发重载
+curl -X POST http://localhost:5000/api/targets/reload
+
+# 删除目标
+curl -X DELETE http://localhost:5000/api/targets/target_003.jpg
+```
+
+### 实时视频标注 (annotate_live.py)
+
+在 RTSP 实时视频流上直接框选新目标：
+
+```bash
+# 基本用法
+python annotate_live.py
+
+# 指定 RTSP 地址
+python annotate_live.py --rtsp rtsp://192.168.144.25:8554/main.264
+
+# 通过 HTTP API 触发重载
+python annotate_live.py --api http://localhost:5000
+```
+
+操作：
+- 鼠标拖框选区域
+- `s` 保存裁剪到 targets/，自动更新 target_info.json
+- `q` 退出
+
+保存后自动触发 recognize.py 的热加载（通过文件监控或 HTTP API）。
 
 ## 技术方案
 
@@ -14,7 +78,7 @@
 | 4 | HSV 颜色反投影 | ~9ms | 形态学滤波 + 轮廓分析 |
 | 5 | 边缘模板匹配 | ~335ms | Canny边缘 + 模板匹配 |
 
-后处理：NMS (IoU=0.3) → 颜色直方图验证 → 返回 Top5 候选
+后处理：NMS (IoU=0.3) -> 颜色直方图验证 -> 返回 Top5 候选
 
 ### 快速模式 (--fast)
 
@@ -37,66 +101,44 @@
 ## 使用方法
 
 ### 1. 采集目标照片
-
 ```bash
 python capture_zoom.py
+# +/- 调整变焦, 空格拍照, q 退出
 ```
-
-- `+/-` 调整变焦 (1x/2x/3x/4x/6x)
-- `空格` 拍照保存到 `captures/`
-- `q` 退出
 
 ### 2. 标注目标区域
-
 ```bash
-python annotate.py
+python annotate.py        # 离线 (从已有图片)
+python annotate_live.py   # 实时 (从 RTSP 流)
 ```
-
-- 鼠标框选目标区域
-- 自动裁剪保存到 `targets/`，生成 `target_info.json`
 
 ### 3. 实时识别
-
 ```bash
-# 快速模式 (~29ms/帧)
-python recognize.py --fast
-
-# 快速模式 + 录像保存
-python recognize.py --fast --save
-
-# 全量模式 (5种方法全跑)
-python recognize.py
-
-# 批量测试图片
-python recognize.py --batch
-
-# 单张图片测试
-python recognize.py --image captures/zoom_1x.jpg
+python recognize.py --fast         # 快速模式
+python recognize.py --fast --save  # 快速模式 + 录像
+python recognize.py                # 全量模式
+python recognize.py --batch        # 批量测试
 ```
+运行时按键: `f`=切换模式 `p`=暂停 `r`=重载目标 `q`=退出
 
-运行时按键：
-- `f` 切换快速/全量模式
-- `p` 暂停/继续识别
-- `q` 退出
-
-## 硬件配置
-
-- **相机：** SIYI A8mini 云台相机
-- **视频流：** RTSP `rtsp://192.168.144.25:8554/main.264` (1280×720, HEVC)
-- **云台控制：** UDP `192.168.144.25:37260` (SIYI 私有协议)
-- **传输模式：** TCP (避免 UDP 丢包)
+### 4. 目标管理服务器
+```bash
+python target_server.py  # 启动 HTTP API (端口 5000)
+```
 
 ## 文件结构
 
 ```
 a8mini_tracker/
-├── recognize.py       # 核心识别引擎 (多方法 + 实时视频流 + 录像)
-├── capture_zoom.py    # RTSP 多变焦抓图工具
-├── annotate.py        # 目标区域标注/裁剪工具
-├── siyi_sdk.py        # A8mini 云台协议 (变焦控制)
-├── captures/          # 采集的场景图 (1x~4x 变焦)
-├── targets/           # 目标模板 (裁剪图 + target_info.json)
-└── recordings/        # 识别录像输出 (MP4, git忽略)
+|-- recognize.py       # 核心识别引擎 (多方法 + 实时 + 热加载)
+|-- target_server.py   # 目标管理 HTTP API (Flask)
+|-- annotate_live.py   # RTSP 实时视频流标注工具
+|-- capture_zoom.py    # RTSP 多变焦抓图工具
+|-- annotate.py        # 目标区域标注工具 (离线)
+|-- siyi_sdk.py        # A8mini 云台协议 (变焦控制)
+|-- captures/          # 采集的场景图
+|-- targets/           # 目标模板 + target_info.json
+|-- recordings/        # 识别录像输出
 ```
 
 ## 依赖
@@ -105,8 +147,5 @@ a8mini_tracker/
 Python 3.8+
 opencv-python (含 contrib, 需要 SIFT)
 numpy
+flask  # target_server.py
 ```
-
-## 为什么不用 YOLO
-
-本系统识别的是**特定个体目标**（拿到照片后找这个具体的东西），而非物体类别。YOLO 需要大量标注数据训练且只能识别类别，无法满足"临时换目标、秒切"的需求。传统视觉方案在本场景中更合适：换目标只需几张照片，无需训练，29ms 即可完成识别。

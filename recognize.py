@@ -1,19 +1,19 @@
 """
-目标识别测试 (多方法 + 分步计时)
-方法:
-  1. 多尺度模板匹配
-  2. ORB 特征点匹配 + 单应性
-  3. SIFT 特征点匹配 + 单应性
-  4. HSV 颜色直方图反投影
-  5. 边缘轮廓匹配
+Target Recognition Engine (Multi-method + Timing)
+Methods:
+  1. Multi-scale template matching
+  2. ORB feature matching + homography
+  3. SIFT feature matching + homography
+  4. HSV color histogram backprojection
+  5. Edge contour matching
 
-用法:
-  python recognize.py --batch              # 批量测试
-  python recognize.py --image xxx.jpg      # 单张测试
-  python recognize.py                      # RTSP实时 (全方法, ~1fps)
-  python recognize.py --fast               # RTSP实时 快速模式 (ORB+颜色, ~30fps)
-  python recognize.py --save               # RTSP实时 + 录像保存
-  python recognize.py --fast --save        # 快速模式 + 录像保存
+Usage:
+  python recognize.py --batch              # batch test
+  python recognize.py --image xxx.jpg      # single image
+  python recognize.py                      # RTSP live (all methods, ~1fps)
+  python recognize.py --fast               # RTSP live fast (ORB+color, ~30fps)
+  python recognize.py --save               # RTSP live + record
+  python recognize.py --fast --save        # fast + record
 """
 
 import cv2
@@ -28,6 +28,8 @@ import glob
 class TargetRecognizer:
     def __init__(self, targets_dir="targets"):
         self.targets = []
+        self._targets_dir = targets_dir
+        self._last_reload_time = None
         self.orb = cv2.ORB_create(nfeatures=2000)
         self.sift = cv2.SIFT_create(nfeatures=1000)
         self.bf_hamming = cv2.BFMatcher(cv2.NORM_HAMMING)
@@ -37,11 +39,13 @@ class TargetRecognizer:
         self.flann = cv2.FlannBasedMatcher(index_params, search_params)
         self._load(targets_dir)
 
-    def _load(self, targets_dir):
+    def _prepare_targets(self, targets_dir):
+        """Prepare target template list (does not modify self.targets), returns new list"""
         info_path = os.path.join(targets_dir, "target_info.json")
         with open(info_path, "r", encoding="utf-8") as f:
             annotations = json.load(f)
 
+        new_targets = []
         for ann in annotations:
             img = cv2.imread(os.path.join(targets_dir, ann["crop"]))
             if img is None:
@@ -53,16 +57,16 @@ class TargetRecognizer:
             orb_kp, orb_des = self.orb.detectAndCompute(gray, None)
             # SIFT
             sift_kp, sift_des = self.sift.detectAndCompute(gray, None)
-            # HSV 直方图
+            # HSV histogram
             hist_hs = cv2.calcHist([hsv], [0, 1], None, [30, 32], [0, 180, 0, 256])
             cv2.normalize(hist_hs, hist_hs)
-            # 用于反投影的直方图
+            # Backprojection histogram
             hist_bp = cv2.calcHist([hsv], [0, 1], None, [180, 256], [0, 180, 0, 256])
             cv2.normalize(hist_bp, hist_bp, 0, 255, cv2.NORM_MINMAX)
-            # 边缘
+            # Edges
             edges = cv2.Canny(gray, 50, 150)
 
-            self.targets.append({
+            new_targets.append({
                 "name": ann["crop"],
                 "source": ann["source"],
                 "image": img,
@@ -74,14 +78,33 @@ class TargetRecognizer:
                 "hist_bp": hist_bp,
                 "edges": edges,
             })
-        print(f"已加载 {len(self.targets)} 个目标模板")
+        return new_targets
+
+    def _load(self, targets_dir):
+        self._targets_dir = targets_dir
+        self.targets = self._prepare_targets(targets_dir)
+        self._last_reload_time = time.time()
+        print(f"Loaded {len(self.targets)} target templates")
+
+    def reload_targets(self, targets_dir=None):
+        """Thread-safe hot-swap target templates"""
+        if targets_dir is None:
+            targets_dir = self._targets_dir
+        try:
+            new_targets = self._prepare_targets(targets_dir)
+            # Atomic swap (Python GIL guarantees assignment atomicity)
+            self.targets = new_targets
+            self._last_reload_time = time.time()
+            print(f"[Hot-reload] Swapped to {len(new_targets)} target templates")
+        except Exception as e:
+            print(f"[Hot-reload] Failed: {e}")
 
     def recognize(self, scene_bgr, fast=False):
         """
-        在场景中识别目标
-        fast=True: 降分辨率模板 + ORB + 颜色反投影 (~160ms, ~6fps)
-        fast=False: 全部5种方法 (~1000ms, ~1fps)
-        返回: results_list, timing_dict
+        Recognize targets in scene
+        fast=True: downscaled template + ORB + color backprojection
+        fast=False: all 5 methods
+        Returns: results_list, timing_dict
         """
         scene_h, scene_w = scene_bgr.shape[:2]
         scene_gray = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2GRAY)
@@ -89,23 +112,28 @@ class TargetRecognizer:
         timing = {}
         all_results = []
 
-        aspect_ratios = [t["gray"].shape[0] / t["gray"].shape[1] for t in self.targets]
+        # Local ref to avoid inconsistency during hot-swap
+        targets = self.targets
+        if not targets:
+            timing["total"] = 0
+            return [], timing
+
+        aspect_ratios = [t["gray"].shape[0] / t["gray"].shape[1] for t in targets]
         avg_ar = np.mean(aspect_ratios)
         min_dim = int(min(scene_w, scene_h) * 0.03)
 
-        # === 方法1: 多尺度模板匹配 ===
+        # === Method 1: Multi-scale template matching ===
         t0 = time.time()
         template_results = []
         if fast:
-            # 快速模式: 场景缩小到1/3，减少尺度数
             ds = 1.0 / 3
             scene_small = cv2.resize(scene_gray, None, fx=ds, fy=ds)
-            scales = np.arange(0.3, 1.5, 0.4)  # 3个尺度 vs 全量12个
+            scales = np.arange(0.3, 1.5, 0.4)
         else:
             scene_small = scene_gray
             ds = 1.0
             scales = np.arange(0.3, 1.5, 0.1)
-        for t in self.targets:
+        for t in targets:
             th, tw = t["gray"].shape[:2]
             for scale in scales:
                 nw, nh = int(tw * scale * ds), int(th * scale * ds)
@@ -118,23 +146,21 @@ class TargetRecognizer:
                 res = cv2.matchTemplate(scene_small, resized, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, max_loc = cv2.minMaxLoc(res)
                 if max_val > 0.6:
-                    # 坐标映射回原始分辨率
                     ox, oy = int(max_loc[0] / ds), int(max_loc[1] / ds)
                     ow, oh = int(nw / ds), int(nh / ds)
                     template_results.append((max_val, ox, oy, ow, oh, "template"))
         timing["template"] = time.time() - t0
         all_results.extend(template_results)
 
-        # 快速模式: 模板高置信度命中时跳过后续方法
         high_conf = fast and any(s > 0.8 for s, *_ in template_results)
 
-        # === 方法2: ORB 特征匹配 ===
+        # === Method 2: ORB feature matching ===
         if not high_conf:
             t0 = time.time()
             orb_results = []
             orb_kp_s, orb_des_s = self.orb.detectAndCompute(scene_gray, None)
             if orb_des_s is not None:
-                for t in self.targets:
+                for t in targets:
                     if t["orb_des"] is None:
                         continue
                     matches = self.bf_hamming.knnMatch(t["orb_des"], orb_des_s, k=2)
@@ -148,12 +174,12 @@ class TargetRecognizer:
             all_results.extend(orb_results)
 
         if not fast:
-            # === 方法3: SIFT 特征匹配 (FLANN加速) ===
+            # === Method 3: SIFT feature matching (FLANN) ===
             t0 = time.time()
             sift_results = []
             sift_kp_s, sift_des_s = self.sift.detectAndCompute(scene_gray, None)
             if sift_des_s is not None and len(sift_des_s) >= 2:
-                for t in self.targets:
+                for t in targets:
                     if t["sift_des"] is None or len(t["sift_des"]) < 2:
                         continue
                     matches = self.flann.knnMatch(t["sift_des"], sift_des_s, k=2)
@@ -167,11 +193,11 @@ class TargetRecognizer:
             timing["sift"] = time.time() - t0
             all_results.extend(sift_results)
 
-        # === 方法4: HSV 颜色反投影 ===
+        # === Method 4: HSV color backprojection ===
         if not high_conf:
             t0 = time.time()
             bp_results = []
-            for t in self.targets:
+            for t in targets:
                 backproj = cv2.calcBackProject([scene_hsv], [0, 1], t["hist_bp"],
                                                [0, 180, 0, 256], 1)
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -195,11 +221,11 @@ class TargetRecognizer:
             all_results.extend(bp_results)
 
         if not fast:
-            # === 方法5: 边缘模板匹配 ===
+            # === Method 5: Edge template matching ===
             t0 = time.time()
             edge_results = []
             scene_edges = cv2.Canny(scene_gray, 50, 150)
-            for t in self.targets:
+            for t in targets:
                 th, tw = t["edges"].shape[:2]
                 for scale in np.arange(0.4, 1.4, 0.15):
                     nw, nh = int(tw * scale), int(th * scale)
@@ -215,7 +241,7 @@ class TargetRecognizer:
             timing["edge"] = time.time() - t0
             all_results.extend(edge_results)
 
-        # === NMS + 颜色验证 ===
+        # === NMS + color verification ===
         t0 = time.time()
         all_results = self._nms(all_results, 0.3)
 
@@ -232,7 +258,7 @@ class TargetRecognizer:
             cv2.normalize(hist, hist)
             color_score = max(
                 cv2.compareHist(t["hist_hs"], hist, cv2.HISTCMP_CORREL)
-                for t in self.targets
+                for t in targets
             )
             combined = 0.4 * score + 0.6 * max(color_score, 0)
             if combined >= 0.45:
@@ -246,7 +272,6 @@ class TargetRecognizer:
 
     def _homography_box(self, t, good_matches, scene_kps, kp_key,
                         scene_w, scene_h, min_dim, avg_ar):
-        """从好的匹配点计算单应性变换，返回检测框"""
         src_pts = np.float32([t[kp_key][m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
         dst_pts = np.float32([scene_kps[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
         M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
@@ -289,15 +314,14 @@ class TargetRecognizer:
         return keep
 
 
-def draw_results(img, results, timing=None, label=""):
-    """在图上画识别结果和计时信息"""
+def draw_results(img, results, timing=None, label="", recognizer=None):
     display = img.copy()
     for score, x, y, w, h, method in results:
         color = (0, 255, 0) if score > 0.6 else (0, 255, 255) if score > 0.4 else (0, 0, 255)
         cv2.rectangle(display, (x, y), (x+w, y+h), color, 2)
         cv2.putText(display, f"{method} {score:.2f}", (x, y-8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-    # 左上角信息
+    # Top-left info
     y_off = 25
     if label:
         cv2.putText(display, label, (10, y_off),
@@ -311,40 +335,55 @@ def draw_results(img, results, timing=None, label=""):
                 cv2.putText(display, text, (10, y_off),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                 y_off += 20
+
+    # Top-right: target count and last update time
+    if recognizer is not None:
+        disp_h, disp_w = display.shape[:2]
+        n_targets = len(recognizer.targets)
+        target_text = f"Targets: {n_targets}"
+        cv2.putText(display, target_text, (disp_w - 200, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        if recognizer._last_reload_time is not None:
+            from datetime import datetime
+            t_str = datetime.fromtimestamp(recognizer._last_reload_time).strftime("%H:%M:%S")
+            reload_text = f"Updated: {t_str}"
+            cv2.putText(display, reload_text, (disp_w - 200, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
     return display
 
 
 def print_timing(timing):
-    """打印分步耗时"""
-    print(f"  分步耗时:")
+    print("  Timing breakdown:")
     for key in ["template", "orb", "sift", "color_bp", "edge", "nms_verify"]:
         if key in timing:
             print(f"    {key:12s}: {timing[key]*1000:6.0f} ms")
-    print(f"    {'总计':12s}: {timing.get('total',0)*1000:6.0f} ms")
-
+    total_ms = timing.get('total', 0) * 1000
+    total_label = "total"
+    print(f"    {total_label:12s}: {total_ms:6.0f} ms")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image", type=str, help="测试图片路径")
-    parser.add_argument("--batch", action="store_true", help="批量测试captures/下所有图片")
-    parser.add_argument("--fast", action="store_true", help="快速模式: 只用ORB+颜色 (~20ms)")
-    parser.add_argument("--save", action="store_true", help="保存识别视频到 recordings/")
+    parser.add_argument("--image", type=str)
+    parser.add_argument("--batch", action="store_true")
+    parser.add_argument("--fast", action="store_true")
+    parser.add_argument("--save", action="store_true")
     parser.add_argument("--rtsp", default="rtsp://192.168.144.25:8554/main.264")
     args = parser.parse_args()
 
     t_start = time.time()
     rec = TargetRecognizer()
     t_load = time.time()
-    print(f"[阶段1] 模板加载+特征预计算: {(t_load - t_start)*1000:.0f} ms")
+    print(f"[Phase 1] Template load + feature precompute: {(t_load - t_start)*1000:.0f} ms")
 
     if args.batch:
         results_dir = "results"
         os.makedirs(results_dir, exist_ok=True)
         images = sorted(glob.glob("captures/*.jpg"))
         if not images:
-            print("captures/ 中没有图片")
+            print("No images in captures/")
             return
-        print(f"批量测试 {len(images)} 张图片\n")
+        print(f"Batch testing {len(images)} images\n")
         for img_path in images:
             img = cv2.imread(img_path)
             if img is None:
@@ -354,25 +393,25 @@ def main():
             print(f"--- {name} ---")
             if results:
                 for score, x, y, w, h, method in results:
-                    print(f"  [{method:8s}] 得分={score:.3f} 位置=({x},{y}) 大小={w}x{h}")
+                    print(f"  [{method:8s}] score={score:.3f} pos=({x},{y}) size={w}x{h}")
             else:
-                print("  未检测到目标")
+                print("  No target detected")
             print_timing(timing)
             display = draw_results(img, results, timing, name)
             save_path = os.path.join(results_dir, f"result_{name}")
             cv2.imwrite(save_path, display)
-            print(f"  保存: {save_path}\n")
-        print(f"所有结果已保存到 {results_dir}/")
+            print(f"  Saved: {save_path}\n")
+        print(f"All results saved to {results_dir}/")
 
     elif args.image:
         img = cv2.imread(args.image)
         if img is None:
-            print(f"无法读取: {args.image}")
+            print(f"Cannot read: {args.image}")
             return
         results, timing = rec.recognize(img)
-        print(f"找到 {len(results)} 个候选:")
+        print(f"Found {len(results)} candidates:")
         for score, x, y, w, h, method in results:
-            print(f"  [{method:8s}] 得分={score:.3f} 位置=({x},{y}) 大小={w}x{h}")
+            print(f"  [{method:8s}] score={score:.3f} pos=({x},{y}) size={w}x{h}")
         print_timing(timing)
         display = draw_results(img, results, timing)
         cv2.imshow("Result", display)
@@ -388,12 +427,11 @@ def main():
         cap = cv2.VideoCapture(args.rtsp, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         t_conn1 = time.time()
-        print(f"[阶段2] RTSP连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
+        print(f"[Phase 2] RTSP connected: {(t_conn1 - t_conn0)*1000:.0f} ms")
         if not cap.isOpened():
-            print("无法连接")
+            print("Cannot connect")
             return
 
-        # 录像初始化
         writer = None
         if args.save:
             os.makedirs("recordings", exist_ok=True)
@@ -403,9 +441,8 @@ def main():
             fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(save_path, fourcc, 25, (fw, fh))
-            print(f"录像保存到: {save_path}")
+            print(f"Recording to: {save_path}")
 
-        # 共享状态
         lock = threading.Lock()
         latest_frame = [None]
         latest_results = [[], {}]
@@ -415,7 +452,6 @@ def main():
         t_first_frame = [None]
 
         def recognize_loop():
-            """后台线程: 持续对最新帧做识别"""
             while running[0]:
                 with lock:
                     frame = latest_frame[0]
@@ -428,15 +464,35 @@ def main():
                     latest_results[1] = timing
                 if first_detect[0] and results:
                     t_found = time.time()
-                    print(f"[阶段4] 首次识别到目标: {(t_found - t_start)*1000:.0f} ms (从启动算起)")
-                    print(f"         识别耗时: {timing.get('total',0)*1000:.0f} ms")
-                    print(f"         找到 {len(results)} 个候选")
+                    print(f"[Phase 4] First detection: {(t_found - t_start)*1000:.0f} ms")
+                    print(f"         Recognition time: {timing.get('total',0)*1000:.0f} ms")
+                    print(f"         Found {len(results)} candidates")
                     first_detect[0] = False
+
+        def target_watcher():
+            info_path = os.path.join(rec._targets_dir, "target_info.json")
+            try:
+                last_mtime = os.path.getmtime(info_path)
+            except OSError:
+                last_mtime = 0
+            while running[0]:
+                time.sleep(2)
+                try:
+                    mtime = os.path.getmtime(info_path)
+                    if mtime != last_mtime:
+                        last_mtime = mtime
+                        rec.reload_targets()
+                except Exception:
+                    pass
 
         t = threading.Thread(target=recognize_loop, daemon=True)
         t.start()
+
+        tw = threading.Thread(target=target_watcher, daemon=True)
+        tw.start()
+
         mode_str = "FAST" if use_fast else "FULL"
-        print(f"实时识别中 [{mode_str}]... p=暂停/继续  f=切换快速/全量  q=退出")
+        print(f"Live recognition [{mode_str}]... p=pause  f=toggle fast/full  r=reload targets  q=quit")
         paused = False
         first_frame = True
 
@@ -447,23 +503,20 @@ def main():
 
             if first_frame:
                 t_first_frame[0] = time.time()
-                print(f"[阶段3] 收到第一帧: {(t_first_frame[0] - t_start)*1000:.0f} ms (从启动算起)")
+                print(f"[Phase 3] First frame: {(t_first_frame[0] - t_start)*1000:.0f} ms")
                 first_frame = False
 
-            # 送最新帧给识别线程
             if not paused:
                 with lock:
                     latest_frame[0] = frame.copy()
 
-            # 取最新识别结果叠加显示
             with lock:
                 results = latest_results[0]
                 timing = latest_results[1]
 
             status = ("FAST" if use_fast else "FULL") + (" PAUSED" if paused else "")
-            display = draw_results(frame, results, timing, status)
+            display = draw_results(frame, results, timing, status, recognizer=rec)
 
-            # 写入录像（带识别框的画面）
             if writer is not None:
                 writer.write(display)
 
@@ -474,16 +527,20 @@ def main():
                 break
             elif key == ord('p'):
                 paused = not paused
-                print("暂停" if paused else "继续")
+                print("Paused" if paused else "Resumed")
             elif key == ord('f'):
                 use_fast = not use_fast
-                print(f"切换到 {'快速(ORB+颜色)' if use_fast else '全量(5方法)'} 模式")
+                mode = "Fast(ORB+color)" if use_fast else "Full(5 methods)"
+                print(f"Switched to {mode}")
+            elif key == ord('r'):
+                print("Manual target reload triggered...")
+                threading.Thread(target=rec.reload_targets, daemon=True).start()
 
         running[0] = False
         t.join(timeout=2)
         if writer is not None:
             writer.release()
-            print(f"录像已保存")
+            print("Recording saved")
         cap.release()
         cv2.destroyAllWindows()
 
