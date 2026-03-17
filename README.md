@@ -36,6 +36,12 @@ python target_server.py
 | PUT | `/api/targets/<name>` | 更新目标权重和最低置信度 |
 | DELETE | `/api/targets/<name>` | 删除某个目标 |
 | GET | `/api/targets/<name>/preview` | 获取目标模板缩略图 |
+| GET | `/api/targets/export` | 导出当前目标为 ZIP |
+| POST | `/api/targets/import` | 从 ZIP 导入目标（替换当前目标） |
+| GET | `/api/history` | 列出目标模板历史快照 |
+| POST | `/api/history/rollback` | 回滚到指定快照 |
+| GET | `/api/history/detections` | 最近N次识别结果 |
+| GET | `/api/stats` | 识别统计信息 |
 | GET | `/api/events` | SSE 实时事件流（识别结果+重载通知） |
 
 示例：
@@ -90,6 +96,40 @@ curl http://localhost:5000/api/events
 - **detection**: 每帧最佳识别结果 (score, method, bbox)
 - **reload**: 目标模板重载通知 (added, removed, count)
 - **heartbeat**: 30秒无事件时发送心跳保持连接
+
+### Round 4: 版本管理 + 批量导入导出 + 识别统计
+
+#### 目标模板版本管理 (target_history.py)
+
+每次 reload 时自动保存当前目标集快照，支持查看历史和回滚：
+
+```bash
+# 列出历史快照
+curl http://localhost:5000/api/history
+
+# 回滚到指定快照
+curl -X POST -H "Content-Type: application/json"      -d '{"snapshot": "20260317_143000_reload_+1_-0"}'      http://localhost:5000/api/history/rollback
+```
+
+#### 批量导入/导出
+
+```bash
+# 导出当前目标为 ZIP
+curl -o targets.zip http://localhost:5000/api/targets/export
+
+# 从 ZIP 导入目标（替换当前所有目标）
+curl -X POST -F "file=@targets.zip" http://localhost:5000/api/targets/import
+```
+
+#### 识别统计
+
+```bash
+# 查看识别统计信息（平均耗时、检测率等）
+curl http://localhost:5000/api/stats
+
+# 查看最近N次识别结果
+curl http://localhost:5000/api/history/detections?n=20
+```
 
 ### 实时视频标注 (annotate_live.py)
 
@@ -225,6 +265,7 @@ python target_server.py
 ```
 a8mini_tracker/
 ├── recognize.py       # 核心识别引擎 (多方法 + 实时 + 热加载 + API集成)
+├── target_history.py  # 目标模板版本管理 (快照/回滚)
 ├── target_server.py   # 目标管理 HTTP API 服务器 (Flask)
 ├── annotate_live.py   # RTSP 实时视频流目标标注工具
 ├── capture_zoom.py    # RTSP 多变焦抓图工具
