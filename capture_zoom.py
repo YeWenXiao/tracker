@@ -43,9 +43,7 @@ def main():
 
     if use_mipi:
         mipi_cam = MIPICamera(width=1280, height=720, fps=30)
-        if not mipi_cam.isOpened():
-            print("无法打开 MIPI 摄像头")
-            exit(1)
+        mipi_cam.open()
     else:
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
         cap = cv2.VideoCapture(args.rtsp, cv2.CAP_FFMPEG)
@@ -65,11 +63,13 @@ def main():
 
     while True:
         if use_mipi:
-            ret, frame = mipi_cam.read()
+            frame = mipi_cam.read()
+            if frame is None:
+                continue
         else:
             ret, frame = cap.read()
-        if not ret:
-            continue
+            if not ret:
+                continue
 
         display = frame.copy()
         info = f"[{source_name}] Zoom: {ZOOM_LEVELS[zoom_idx]}x | Photos: {count}"
