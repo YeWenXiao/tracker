@@ -15,6 +15,12 @@ API:
   PUT    /api/targets/<name>         - 更新目标的 weight / min_confidence
   DELETE /api/targets/<name>         - 删除某个目标
   GET    /api/targets/<name>/preview - 获取目标模板缩略图
+  GET    /api/targets/export         - 导出目标为 ZIP
+  POST   /api/targets/import         - 从 ZIP 导入目标
+  GET    /api/history                - 列出目标模板历史快照
+  POST   /api/history/rollback       - 回滚到指定快照
+  GET    /api/history/detections     - 最近N次识别结果
+  GET    /api/stats                  - 识别统计信息
   GET    /api/events                 - SSE 实时事件流
 """
 
@@ -23,12 +29,15 @@ import json
 import time
 from flask import Flask, request, jsonify, send_file, Response
 
+from target_history import TargetHistory
+
 app = Flask(__name__)
 
 TARGETS_DIR = os.environ.get("TARGETS_DIR", "targets")
 INFO_FILE = "target_info.json"
 
 _recognizer = None
+_target_history = TargetHistory()
 
 
 def set_recognizer(rec):
@@ -319,6 +328,105 @@ def preview_target(name):
     if not os.path.exists(file_path):
         return jsonify({"error": "未找到"}), 404
     return send_file(file_path, mimetype="image/jpeg")
+
+
+
+
+# ==================== 历史管理 API ====================
+
+@app.route("/api/history", methods=["GET"])
+def list_history():
+    """列出目标模板的历史快照"""
+    snapshots = _target_history.list_snapshots()
+    return jsonify({"snapshots": snapshots, "count": len(snapshots)})
+
+
+@app.route("/api/history/rollback", methods=["POST"])
+def rollback_history():
+    """回滚到指定快照"""
+    data = request.get_json(silent=True) or {}
+    snapshot = data.get("snapshot")
+    if not snapshot:
+        return jsonify({"error": "需要 snapshot 参数"}), 400
+    try:
+        _target_history.rollback(snapshot)
+        # 触发 reload
+        if _recognizer is not None:
+            _recognizer.reload_targets()
+        return jsonify({"message": f"已回滚到 {snapshot}"})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+
+@app.route("/api/history/detections", methods=["GET"])
+def detection_history():
+    """返回最近N次识别结果"""
+    try:
+        from recognize import recognition_history
+    except ImportError:
+        return jsonify({"error": "需要 recognize 模块"}), 500
+    n = request.args.get("n", 10, type=int)
+    recent = recognition_history.recent(n)
+    return jsonify({"detections": recent, "count": len(recent)})
+
+
+@app.route("/api/stats", methods=["GET"])
+def recognition_stats():
+    """返回识别统计信息"""
+    try:
+        from recognize import recognition_history
+    except ImportError:
+        return jsonify({"error": "需要 recognize 模块"}), 500
+    stats = recognition_history.stats()
+    return jsonify(stats)
+
+
+# ==================== 批量导入/导出 ====================
+
+@app.route("/api/targets/export", methods=["GET"])
+def export_targets():
+    """打包当前目标为 ZIP 下载"""
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in os.listdir(TARGETS_DIR):
+            filepath = os.path.join(TARGETS_DIR, f)
+            if os.path.isfile(filepath):
+                zf.write(filepath, f)
+    buf.seek(0)
+    return send_file(buf, mimetype="application/zip",
+                     as_attachment=True, download_name="targets.zip")
+
+
+@app.route("/api/targets/import", methods=["POST"])
+def import_targets():
+    """从 ZIP 导入目标（替换当前所有目标）"""
+    if "file" not in request.files:
+        return jsonify({"error": "需要 file 字段"}), 400
+    import zipfile
+    import io
+    file = request.files["file"]
+    if not file.filename.endswith(".zip"):
+        return jsonify({"error": "需要 ZIP 文件"}), 400
+    # 保存当前状态快照
+    try:
+        _target_history.save_snapshot(label="before_import")
+    except Exception:
+        pass
+    # 清空当前目标目录
+    for f in os.listdir(TARGETS_DIR):
+        fpath = os.path.join(TARGETS_DIR, f)
+        if os.path.isfile(fpath):
+            os.remove(fpath)
+    # 解压到 targets/ 目录
+    with zipfile.ZipFile(io.BytesIO(file.read())) as zf:
+        zf.extractall(TARGETS_DIR)
+    # 触发 reload
+    if _recognizer is not None:
+        _recognizer.reload_targets()
+    annotations = _read_info()
+    return jsonify({"message": "导入成功", "count": len(annotations)})
 
 
 # ==================== SSE 事件流 ====================
