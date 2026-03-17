@@ -29,6 +29,8 @@ import argparse
 import time
 import glob
 import logging
+import pickle
+import hashlib
 
 from logger import setup_logger
 from tracker import KalmanTracker, MultiTracker
@@ -62,6 +64,58 @@ def load_config(path="config.yaml"):
         return {}
 
 
+CACHE_DIR = ".feature_cache"
+
+
+def _get_image_hash(img):
+    """图片内容哈希"""
+    return hashlib.md5(img.tobytes()).hexdigest()[:16]
+
+
+def _load_cached_features(img, cache_key):
+    """从缓存加载预计算的特征"""
+    cache_path = os.path.join(CACHE_DIR, f"{cache_key}.pkl")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "rb") as f:
+                data = pickle.load(f)
+            # 验证图片哈希
+            if data.get("hash") == _get_image_hash(img):
+                return data
+        except Exception:
+            pass
+    return None
+
+
+def _save_cached_features(img, cache_key, features):
+    """保存特征到缓存"""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    features["hash"] = _get_image_hash(img)
+    cache_path = os.path.join(CACHE_DIR, f"{cache_key}.pkl")
+    with open(cache_path, "wb") as f:
+        pickle.dump(features, f)
+
+
+def _serialize_keypoints(kps):
+    """将 cv2.KeyPoint 列表序列化为 tuple 列表"""
+    if kps is None:
+        return None
+    return [(kp.pt, kp.size, kp.angle, kp.response, kp.octave, kp.class_id)
+            for kp in kps]
+
+
+def _deserialize_keypoints(kp_tuples):
+    """从 tuple 列表还原 cv2.KeyPoint 列表"""
+    if kp_tuples is None:
+        return None
+    kps = []
+    for pt, size, angle, response, octave, class_id in kp_tuples:
+        kp = cv2.KeyPoint(x=pt[0], y=pt[1], size=size, angle=angle,
+                          response=response, octave=octave, class_id=class_id)
+        kps.append(kp)
+    return kps
+
+
 class TargetRecognizer:
     def __init__(self, targets_dir="targets"):
         self.targets = []
@@ -91,6 +145,7 @@ class TargetRecognizer:
         with open(info_path, "r", encoding="utf-8") as f:
             annotations = json.load(f)
 
+        cache_hits = 0
         for ann in annotations:
             img = cv2.imread(os.path.join(targets_dir, ann["crop"]))
             if img is None:
@@ -98,18 +153,39 @@ class TargetRecognizer:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-            # ORB
-            orb_kp, orb_des = self.orb.detectAndCompute(gray, None)
-            # SIFT
-            sift_kp, sift_des = self.sift.detectAndCompute(gray, None)
-            # HSV 直方图
-            hist_hs = cv2.calcHist([hsv], [0, 1], None, [30, 32], [0, 180, 0, 256])
-            cv2.normalize(hist_hs, hist_hs)
-            # 用于反投影的直方图
-            hist_bp = cv2.calcHist([hsv], [0, 1], None, [180, 256], [0, 180, 0, 256])
-            cv2.normalize(hist_bp, hist_bp, 0, 255, cv2.NORM_MINMAX)
-            # 边缘
-            edges = cv2.Canny(gray, 50, 150)
+            # 尝试从缓存加载特征
+            cache_key = ann["crop"].replace("/", "_").replace(".", "_")
+            cached = _load_cached_features(img, cache_key)
+
+            if cached is not None:
+                # 从缓存还原
+                orb_kp = _deserialize_keypoints(cached.get("orb_kp_ser"))
+                orb_des = cached.get("orb_des")
+                sift_kp = _deserialize_keypoints(cached.get("sift_kp_ser"))
+                sift_des = cached.get("sift_des")
+                hist_hs = cached["hist_hs"]
+                hist_bp = cached["hist_bp"]
+                edges = cached["edges"]
+                cache_hits += 1
+            else:
+                # 计算特征
+                orb_kp, orb_des = self.orb.detectAndCompute(gray, None)
+                sift_kp, sift_des = self.sift.detectAndCompute(gray, None)
+                hist_hs = cv2.calcHist([hsv], [0, 1], None, [30, 32], [0, 180, 0, 256])
+                cv2.normalize(hist_hs, hist_hs)
+                hist_bp = cv2.calcHist([hsv], [0, 1], None, [180, 256], [0, 180, 0, 256])
+                cv2.normalize(hist_bp, hist_bp, 0, 255, cv2.NORM_MINMAX)
+                edges = cv2.Canny(gray, 50, 150)
+                # 保存到缓存
+                _save_cached_features(img, cache_key, {
+                    "orb_kp_ser": _serialize_keypoints(orb_kp),
+                    "orb_des": orb_des,
+                    "sift_kp_ser": _serialize_keypoints(sift_kp),
+                    "sift_des": sift_des,
+                    "hist_hs": hist_hs,
+                    "hist_bp": hist_bp,
+                    "edges": edges,
+                })
 
             self.targets.append({
                 "name": ann["crop"],
@@ -123,7 +199,10 @@ class TargetRecognizer:
                 "hist_bp": hist_bp,
                 "edges": edges,
             })
-        log.info("已加载 %d 个目标模板", len(self.targets))
+        if cache_hits > 0:
+            log.info("已加载 %d 个目标模板 (%d 个从缓存恢复)", len(self.targets), cache_hits)
+        else:
+            log.info("已加载 %d 个目标模板 (特征已缓存到 %s/)", len(self.targets), CACHE_DIR)
 
     def recognize(self, scene_bgr, fast=False):
         """
