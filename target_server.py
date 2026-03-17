@@ -27,6 +27,7 @@ API:
 import os
 import json
 import time
+import threading
 import cv2
 import numpy as np
 from flask import Flask, request, jsonify, send_file, Response
@@ -42,26 +43,81 @@ _recognizer = None
 _target_history = TargetHistory()
 
 
+# ==================== 统一错误处理 ====================
+
+def error_response(message, status_code, details=None):
+    """统一错误响应格式"""
+    resp = {"error": message, "status": status_code}
+    if details:
+        resp["details"] = details
+    return jsonify(resp), status_code
+
+
+@app.errorhandler(400)
+def bad_request(e):
+    return error_response("请求参数错误", 400)
+
+
+@app.errorhandler(404)
+def not_found(e):
+    return error_response("资源未找到", 404)
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    return error_response("服务器内部错误", 500, str(e))
+
+
+# ==================== 文件校验 ====================
+
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+def validate_image(file):
+    """校验上传的图片文件"""
+    if not file or file.filename == "":
+        return "未选择文件"
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        return f"不支持的文件类型: {ext}，支持: {ALLOWED_EXTENSIONS}"
+    file.seek(0, 2)
+    size = file.tell()
+    file.seek(0)
+    if size > MAX_FILE_SIZE:
+        return f"文件过大: {size/1024/1024:.1f}MB，最大: {MAX_FILE_SIZE/1024/1024:.0f}MB"
+    return None
+
+
 def set_recognizer(rec):
     """设置外部 recognizer 实例，reload API 会直接调用其 reload_targets()"""
     global _recognizer
     _recognizer = rec
 
 
+# ==================== 并发安全的文件读写 ====================
+
+_file_lock = threading.Lock()
+
+
 def _read_info():
-    """读取 target_info.json"""
-    info_path = os.path.join(TARGETS_DIR, INFO_FILE)
-    if not os.path.exists(info_path):
-        return []
-    with open(info_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """读取 target_info.json（线程安全）"""
+    with _file_lock:
+        info_path = os.path.join(TARGETS_DIR, INFO_FILE)
+        if not os.path.exists(info_path):
+            return []
+        with open(info_path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
 
 def _write_info(annotations):
-    """写入 target_info.json"""
-    info_path = os.path.join(TARGETS_DIR, INFO_FILE)
-    with open(info_path, "w", encoding="utf-8") as f:
-        json.dump(annotations, f, indent=2, ensure_ascii=False)
+    """写入 target_info.json（线程安全 + 原子写入）"""
+    with _file_lock:
+        info_path = os.path.join(TARGETS_DIR, INFO_FILE)
+        tmp_path = info_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(annotations, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, info_path)
 
 
 # ==================== HTML 管理页面 ====================
@@ -256,11 +312,12 @@ def list_targets():
 @app.route("/api/targets/upload", methods=["POST"])
 def upload_target():
     if "image" not in request.files:
-        return jsonify({"error": "No image file in request"}), 400
+        return error_response("请求中未包含图片文件", 400)
 
     file = request.files["image"]
-    if file.filename == "":
-        return jsonify({"error": "Empty filename"}), 400
+    err = validate_image(file)
+    if err:
+        return error_response(err, 400)
 
     os.makedirs(TARGETS_DIR, exist_ok=True)
     annotations = _read_info()
@@ -327,16 +384,21 @@ def upload_target():
 def check_similarity():
     """上传图片检查与已有目标的相似度（不保存）"""
     if "image" not in request.files:
-        return jsonify({"error": "No image file in request"}), 400
+        return error_response("请求中未包含图片文件", 400)
 
     if _recognizer is None:
-        return jsonify({"error": "识别引擎未初始化"}), 503
+        return error_response("识别引擎未初始化", 503)
 
     file = request.files["image"]
+    err = validate_image(file)
+    if err:
+        return error_response(err, 400)
+
+    # 读取图片到内存
     file_bytes = np.frombuffer(file.read(), np.uint8)
     img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     if img is None:
-        return jsonify({"error": "无法解析图片"}), 400
+        return error_response("无法解析图片", 400)
 
     sims = _recognizer.check_similarity(img)
     results = [{"name": n, "score": round(s, 4)} for n, s in sims]
@@ -372,7 +434,7 @@ def update_target(name):
             break
 
     if found is None:
-        return jsonify({"error": f"目标 {name} 未找到"}), 404
+        return error_response(f"目标 {name} 未找到", 404)
 
     data = request.get_json(silent=True) or {}
     if "weight" in data:
@@ -402,7 +464,7 @@ def delete_target(name):
             break
 
     if found is None:
-        return jsonify({"error": f"目标 {name} 未找到"}), 404
+        return error_response(f"目标 {name} 未找到", 404)
 
     file_path = os.path.join(TARGETS_DIR, name)
     if os.path.exists(file_path):
@@ -437,14 +499,14 @@ def get_stats():
             stats["adaptive_threshold"] = round(_recognizer.adaptive_threshold.get(), 4)
         return jsonify(stats)
     except ImportError:
-        return jsonify({"error": "recognize 模块不可用"}), 503
+        return error_response("recognize 模块不可用", 503)
 
 @app.route("/api/targets/<name>/preview", methods=["GET"])
 def preview_target(name):
     """返回目标模板的缩略图"""
     file_path = os.path.join(TARGETS_DIR, name)
     if not os.path.exists(file_path):
-        return jsonify({"error": "未找到"}), 404
+        return error_response(f"目标 {name} 的模板文件未找到", 404)
     return send_file(file_path, mimetype="image/jpeg")
 
 
@@ -465,7 +527,7 @@ def rollback_history():
     data = request.get_json(silent=True) or {}
     snapshot = data.get("snapshot")
     if not snapshot:
-        return jsonify({"error": "需要 snapshot 参数"}), 400
+        return error_response("需要 snapshot 参数", 400)
     try:
         _target_history.rollback(snapshot)
         # 触发 reload
@@ -473,7 +535,7 @@ def rollback_history():
             _recognizer.reload_targets()
         return jsonify({"message": f"已回滚到 {snapshot}"})
     except ValueError as e:
-        return jsonify({"error": str(e)}), 404
+        return error_response(str(e), 404)
 
 
 @app.route("/api/history/detections", methods=["GET"])
@@ -482,21 +544,10 @@ def detection_history():
     try:
         from recognize import recognition_history
     except ImportError:
-        return jsonify({"error": "需要 recognize 模块"}), 500
+        return error_response("需要 recognize 模块", 500)
     n = request.args.get("n", 10, type=int)
     recent = recognition_history.recent(n)
     return jsonify({"detections": recent, "count": len(recent)})
-
-
-@app.route("/api/stats", methods=["GET"])
-def recognition_stats():
-    """返回识别统计信息"""
-    try:
-        from recognize import recognition_history
-    except ImportError:
-        return jsonify({"error": "需要 recognize 模块"}), 500
-    stats = recognition_history.stats()
-    return jsonify(stats)
 
 
 # ==================== 批量导入/导出 ====================
@@ -521,12 +572,12 @@ def export_targets():
 def import_targets():
     """从 ZIP 导入目标（替换当前所有目标）"""
     if "file" not in request.files:
-        return jsonify({"error": "需要 file 字段"}), 400
+        return error_response("需要 file 字段", 400)
     import zipfile
     import io
     file = request.files["file"]
     if not file.filename.endswith(".zip"):
-        return jsonify({"error": "需要 ZIP 文件"}), 400
+        return error_response("需要 ZIP 文件", 400)
     # 保存当前状态快照
     try:
         _target_history.save_snapshot(label="before_import")
@@ -555,7 +606,7 @@ def events():
     try:
         from recognize import register_sse_client, unregister_sse_client
     except ImportError:
-        return jsonify({"error": "SSE 需要 recognize 模块"}), 500
+        return error_response("SSE 需要 recognize 模块", 500)
 
     def generate():
         q = register_sse_client()
