@@ -6,6 +6,12 @@
 
 **核心改进：** 识别引擎运行过程中，无需停止视频流即可更换识别目标。
 
+### Round 7 新增
+
+- **目标分组管理：** target_info.json 支持 `group` 字段，`TargetRecognizer` 新增 `set_active_group()`/`get_groups()` 方法。按键 `g` 循环切换分组，OSD 实时显示当前分组。API: `GET /api/groups`、`PUT /api/groups/active`，上传支持 `group` 参数，管理页面添加分组标签页筛选。
+- **识别报告导出：** `GET /api/report` 支持 JSON 和 HTML 格式。HTML 报告包含概要统计（帧数、耗时、检测率）、目标列表（缩略图+权重+阈值+分组）、检测时间线（CSS bar chart）、分组统计饼图（纯 CSS conic-gradient）。管理页面一键打开报告。
+- **API Token 认证：** 设置 `TRACKER_API_TOKEN` 环境变量启用 Bearer Token 认证。`@require_auth` 装饰器保护敏感接口（上传、删除、重载、更新、设置分组），GET 接口（列表、预览、统计、报告、事件流）无需认证。管理页面自动检测 Token 需求并显示登录栏。
+
 ### Round 6 新增
 
 - **统一错误处理：** 所有 API 错误响应统一格式 `{error, status, details}`，注册 Flask 全局 400/404/500 错误处理器。
@@ -169,6 +175,22 @@ python annotate_live.py --api http://localhost:5000
 
 保存后自动触发 recognize.py 的热加载（通过文件监控或 HTTP API）。
 
+
+### 认证
+
+设置环境变量启用 API Token 认证：
+```bash
+export TRACKER_API_TOKEN=my-secret-token
+python target_server.py
+```
+
+敏感接口需要 Bearer Token：
+```bash
+curl -H "Authorization: Bearer my-secret-token" -X POST http://localhost:5000/api/targets/reload
+```
+
+未设置 `TRACKER_API_TOKEN` 时所有接口无需认证（向后兼容）。
+
 ## 技术方案
 
 采用多方法传统视觉识别引擎，5种方法互补：
@@ -258,6 +280,7 @@ python recognize.py --image captures/zoom_1x.jpg
 - `f` 切换快速/全量模式
 - `p` 暂停/继续识别
 - `r` 手动重载目标模板
+- `g` 循环切换目标分组
 - `q` 退出
 
 ### 4. 目标管理服务器（可选）
