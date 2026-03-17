@@ -6,36 +6,27 @@ MIPI CSI 视频采集模块 (Jetson 平台)
 
 典型延迟: ~50ms (对比 RTSP ~1000ms)
 
-用法:
-    from mipi_camera import MIPICamera
-
+接口完全兼容 cv2.VideoCapture:
     cam = MIPICamera(width=1280, height=720, fps=30)
-    cam.open()
-    frame = cam.read()  # numpy BGR array
+    ret, frame = cam.read()       # 与 cv2.VideoCapture.read() 一致
+    cam.isOpened()                 # 与 cv2.VideoCapture.isOpened() 一致
+    cam.get(cv2.CAP_PROP_...)     # 支持常用属性
     cam.release()
 """
 
 import cv2
 import time
-import numpy as np
 
 
 class MIPICamera:
-    """Jetson MIPI CSI 摄像头采集器（GStreamer + nvarguscamerasrc）"""
+    """Jetson MIPI CSI 摄像头采集器（GStreamer + nvarguscamerasrc）
+
+    接口兼容 cv2.VideoCapture，可直接替换使用。
+    """
 
     def __init__(self, sensor_id=0, width=1280, height=720, fps=30,
                  flip_method=0, exposure_range="13000000 358733000",
                  gain_range="1 10"):
-        """
-        参数:
-            sensor_id:      CSI 传感器编号 (0 或 1)
-            width:          输出宽度
-            height:         输出高度
-            fps:            帧率
-            flip_method:    翻转方式 (0=不翻转, 2=上下翻转)
-            exposure_range: 曝光范围 (ns)，"min max"
-            gain_range:     增益范围，"min max"
-        """
         self.sensor_id = sensor_id
         self.width = width
         self.height = height
@@ -47,81 +38,82 @@ class MIPICamera:
         self._frame_count = 0
         self._start_time = None
 
+        # 构造时自动打开 (与 cv2.VideoCapture 行为一致)
+        self._open()
+
     def _build_pipeline(self):
         """构建 GStreamer pipeline 字符串"""
         pipeline = (
-            f"nvarguscamerasrc sensor-id={self.sensor_id} "
-            f'exposuretimerange="{self.exposure_range}" '
-            f'gainrange="{self.gain_range}" ! '
-            f"video/x-raw(memory:NVMM),"
-            f"width={self.width},height={self.height},"
-            f"framerate={self.fps}/1,format=NV12 ! "
-            f"nvvidconv flip-method={self.flip_method} ! "
-            f"video/x-raw,format=BGRx ! "
-            f"videoconvert ! "
-            f"video/x-raw,format=BGR ! "
-            f"appsink drop=1 max-buffers=1"
+            "nvarguscamerasrc sensor-id={sid} "
+            'exposuretimerange="{exp}" '
+            'gainrange="{gain}" ! '
+            "video/x-raw(memory:NVMM),"
+            "width={w},height={h},"
+            "framerate={fps}/1,format=NV12 ! "
+            "nvvidconv flip-method={flip} ! "
+            "video/x-raw,format=BGRx ! "
+            "videoconvert ! "
+            "video/x-raw,format=BGR ! "
+            "appsink drop=1 max-buffers=1"
+        ).format(
+            sid=self.sensor_id,
+            exp=self.exposure_range,
+            gain=self.gain_range,
+            w=self.width, h=self.height,
+            fps=self.fps,
+            flip=self.flip_method
         )
         return pipeline
 
-    def open(self):
+    def _open(self):
         """打开摄像头"""
         pipeline = self._build_pipeline()
-        print(f"[MIPICamera] GStreamer pipeline:")
-        print(f"  {pipeline}")
+        print("[MIPICamera] GStreamer pipeline:")
+        print("  " + pipeline)
         self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-        if not self.cap.isOpened():
-            raise RuntimeError(
-                f"无法打开 MIPI CSI 摄像头 (sensor_id={self.sensor_id}).\n"
-                f"请检查:\n"
-                f"  1. CSI 排线连接是否正常\n"
-                f"  2. nvarguscamerasrc 是否可用: gst-inspect-1.0 nvarguscamerasrc\n"
-                f"  3. OpenCV 是否编译了 GStreamer 支持\n"
-                f"Pipeline: {pipeline}"
-            )
-        self._start_time = time.time()
-        self._frame_count = 0
-        print(f"[MIPICamera] 已打开 MIPI CSI 摄像头 (sensor={self.sensor_id}, "
-              f"{self.width}x{self.height}@{self.fps}fps)")
-        return True
+        if self.cap.isOpened():
+            self._start_time = time.time()
+            self._frame_count = 0
+            print("[MIPICamera] 已打开 MIPI CSI 摄像头 (sensor={}, {}x{}@{}fps)".format(
+                self.sensor_id, self.width, self.height, self.fps))
+        else:
+            print("[MIPICamera] 警告: 无法打开 MIPI CSI 摄像头 (sensor_id={})".format(
+                self.sensor_id))
+            print("  请检查: 1) CSI排线 2) nvarguscamerasrc 3) OpenCV GStreamer支持")
 
-    def read(self):
-        """
-        读取一帧图像
-
-        返回:
-            numpy.ndarray (BGR) 或 None (读取失败)
-        """
-        if self.cap is None or not self.cap.isOpened():
-            return None
-        ret, frame = self.cap.read()
-        if ret:
-            self._frame_count += 1
-            return frame
-        return None
-
-    def read_with_timestamp(self):
-        """
-        读取一帧并返回时间戳
-
-        返回:
-            (frame, timestamp_ms) 或 (None, 0)
-        """
-        if self.cap is None or not self.cap.isOpened():
-            return None, 0
-        ret, frame = self.cap.read()
-        ts = time.time() * 1000  # ms
-        if ret:
-            self._frame_count += 1
-            return frame, ts
-        return None, 0
-
-    def is_opened(self):
-        """摄像头是否已打开"""
+    def isOpened(self):
+        """摄像头是否已打开 (兼容 cv2.VideoCapture)"""
         return self.cap is not None and self.cap.isOpened()
 
-    def get_fps(self):
-        """获取实际帧率"""
+    def read(self):
+        """读取一帧 (兼容 cv2.VideoCapture, 返回 (ret, frame))"""
+        if self.cap is None or not self.cap.isOpened():
+            return False, None
+        ret, frame = self.cap.read()
+        if ret:
+            self._frame_count += 1
+        return ret, frame
+
+    def get(self, prop_id):
+        """获取属性 (兼容 cv2.VideoCapture)"""
+        if prop_id == cv2.CAP_PROP_FRAME_WIDTH:
+            return float(self.width)
+        elif prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
+            return float(self.height)
+        elif prop_id == cv2.CAP_PROP_FPS:
+            return float(self.fps)
+        elif self.cap is not None:
+            return self.cap.get(prop_id)
+        return 0.0
+
+    def set(self, prop_id, value):
+        """设置属性 (兼容 cv2.VideoCapture, GStreamer 下大多数属性不可写)"""
+        if self.cap is not None:
+            return self.cap.set(prop_id, value)
+        return False
+
+    def get_actual_fps(self):
+        """获取实际采集帧率"""
         if self._start_time is None or self._frame_count == 0:
             return 0.0
         elapsed = time.time() - self._start_time
@@ -134,10 +126,9 @@ class MIPICamera:
         if self.cap is not None:
             self.cap.release()
             self.cap = None
-            print(f"[MIPICamera] 已释放 (共采集 {self._frame_count} 帧)")
+            print("[MIPICamera] 已释放 (共采集 {} 帧)".format(self._frame_count))
 
     def __enter__(self):
-        self.open()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -150,20 +141,12 @@ def create_capture(source="mipi", rtsp_url="rtsp://192.168.144.25:8554/main.264"
     """
     统一视频源工厂函数
 
-    参数:
-        source:   "mipi" 使用 MIPI CSI, "rtsp" 使用 RTSP 流
-        rtsp_url: RTSP 地址 (仅 source="rtsp" 时使用)
-        width:    分辨率宽度
-        height:   分辨率高度
-        fps:      帧率
-        sensor_id: MIPI 传感器编号
-
-    返回:
-        cv2.VideoCapture 或 MIPICamera 对象 (已打开)
+    返回 cv2.VideoCapture 或 MIPICamera (接口兼容)
     """
     if source == "mipi":
         cam = MIPICamera(sensor_id=sensor_id, width=width, height=height, fps=fps)
-        cam.open()
+        if not cam.isOpened():
+            raise RuntimeError("无法打开 MIPI CSI 摄像头")
         return cam
     elif source == "rtsp":
         import os
@@ -171,8 +154,8 @@ def create_capture(source="mipi", rtsp_url="rtsp://192.168.144.25:8554/main.264"
         cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
-            raise RuntimeError(f"无法连接 RTSP: {rtsp_url}")
-        print(f"[RTSP] 已连接: {rtsp_url}")
+            raise RuntimeError("无法连接 RTSP: " + rtsp_url)
+        print("[RTSP] 已连接: " + rtsp_url)
         return cap
     else:
-        raise ValueError(f"未知视频源: {source}, 支持 'mipi' 或 'rtsp'")
+        raise ValueError("未知视频源: {}, 支持 'mipi' 或 'rtsp'".format(source))

@@ -1,6 +1,7 @@
 """
 手动变焦拍摄工具
-- 支持 MIPI CSI (默认) 或 RTSP 视频源
+- 默认使用 MIPI CSI 视频源 (低延迟)
+- 加 --rtsp 切换为 RTSP 视频源
 - 按 + 变焦放大一档，按 - 变焦缩小一档
 - 按空格拍照保存
 - 按 q 退出
@@ -23,53 +24,45 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 
 def main():
     parser = argparse.ArgumentParser(description="A8mini 变焦拍摄工具")
-    parser.add_argument("--source", choices=["mipi", "rtsp"], default="mipi",
-                        help="视频源: mipi (默认) 或 rtsp")
-    parser.add_argument("--rtsp", default="rtsp://192.168.144.25:8554/main.264",
-                        help="RTSP 地址 (仅 --source rtsp 时使用)")
-    parser.add_argument("--mipi", action="store_true",
-                        help="使用 MIPI CSI (等同于 --source mipi)")
+    parser.add_argument("--rtsp", action="store_true",
+                        help="使用 RTSP 视频源 (默认使用 MIPI CSI)")
+    parser.add_argument("--rtsp-url", default="rtsp://192.168.144.25:8554/main.264",
+                        help="RTSP 地址 (仅 --rtsp 时使用)")
     args = parser.parse_args()
 
-    use_mipi = args.mipi or (args.source == "mipi")
     cam = SIYIA8mini()  # 云台控制 (变焦始终走 UDP)
 
     def send_zoom(level):
         threading.Thread(target=lambda: cam.set_zoom(level), daemon=True).start()
 
     # 打开视频源
-    mipi_cam = None
-    cap = None
-
-    if use_mipi:
-        mipi_cam = MIPICamera(width=1280, height=720, fps=30)
-        mipi_cam.open()
-    else:
+    if args.rtsp:
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-        cap = cv2.VideoCapture(args.rtsp, cv2.CAP_FFMPEG)
+        cap = cv2.VideoCapture(args.rtsp_url, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not cap.isOpened():
             print("无法连接 RTSP 流")
             exit(1)
+        source_name = "RTSP"
+    else:
+        cap = MIPICamera(width=1280, height=720, fps=30)
+        if not cap.isOpened():
+            print("无法打开 MIPI CSI 摄像头")
+            exit(1)
+        source_name = "MIPI CSI"
 
     zoom_idx = 0
     send_zoom(ZOOM_LEVELS[zoom_idx])
     count = 0
 
-    source_name = "MIPI CSI" if use_mipi else "RTSP"
     print(f"已连接 A8mini [{source_name}]")
     print(f"变焦档位: {ZOOM_LEVELS}")
     print("操作:  +/= 放大  -/_ 缩小  空格=拍照  q=退出")
 
     while True:
-        if use_mipi:
-            frame = mipi_cam.read()
-            if frame is None:
-                continue
-        else:
-            ret, frame = cap.read()
-            if not ret:
-                continue
+        ret, frame = cap.read()
+        if not ret:
+            continue
 
         display = frame.copy()
         info = f"[{source_name}] Zoom: {ZOOM_LEVELS[zoom_idx]}x | Photos: {count}"
@@ -105,11 +98,7 @@ def main():
         elif key == ord('q'):
             break
 
-    # 释放资源
-    if use_mipi:
-        mipi_cam.release()
-    else:
-        cap.release()
+    cap.release()
     cv2.destroyAllWindows()
     cam.close()
     print(f"\n共拍摄 {count} 张照片")

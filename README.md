@@ -4,12 +4,12 @@
 
 ## v2.0 变化 (MIPI CSI 集成)
 
-- **MIPI CSI 直连采集**: 默认使用 Jetson MIPI CSI 接口，通过 GStreamer + nvarguscamerasrc 硬件加速取帧
+- **MIPI CSI 直连采集**: 默认使用 Jetson MIPI CSI 接口 (无需 --mipi 参数)，通过 GStreamer + nvarguscamerasrc 硬件加速取帧
 - **延迟大幅降低**: MIPI ~50ms vs RTSP ~1000ms 首帧延迟，端到端延迟降低 20 倍
 - **统一视频源接口**: `--source mipi|rtsp` 参数一键切换，RTSP 模式完全保留
 - **实时 FPS 显示**: 画面左上角显示实际采集帧率
-- **变焦拍摄工具也支持 MIPI**: `capture_zoom.py --source mipi` 直接 MIPI 取帧 + UDP 变焦
-- **MIPICamera 模块**: 独立的 `mipi_camera.py`，支持曝光/增益参数调节，接口兼容 cv2.VideoCapture
+- **变焦拍摄工具也支持 MIPI**: `capture_zoom.py` 默认 MIPI 取帧 + UDP 变焦, `--rtsp` 切换
+- **MIPICamera 模块**: 独立的 `mipi_camera.py`，接口完全兼容 cv2.VideoCapture (isOpened/read/get/set/release)
 
 ## 技术方案
 
@@ -62,7 +62,7 @@
 python capture_zoom.py
 
 # RTSP 模式
-python capture_zoom.py --source rtsp
+python capture_zoom.py --rtsp
 ```
 
 - `+/-` 调整变焦 (1x/2x/3x/4x/6x)，变焦始终通过 UDP 控制
@@ -81,17 +81,17 @@ python annotate.py
 ### 3. 实时识别
 
 ```bash
-# MIPI 快速模式 (推荐)
-python recognize.py --mipi --fast
+# MIPI 快速模式 (推荐, 默认MIPI)
+python recognize.py --fast
 
-# MIPI 全量模式
-python recognize.py --mipi
+# MIPI 全量模式 (默认MIPI)
+python recognize.py
 
 # RTSP 快速模式
-python recognize.py --rtsp rtsp://192.168.144.25:8554/main.264 --fast
+python recognize.py --rtsp --fast
 
 # RTSP 全量模式
-python recognize.py --rtsp rtsp://192.168.144.25:8554/main.264
+python recognize.py --rtsp
 
 # 带录像保存
 python recognize.py --fast --save
@@ -112,14 +112,15 @@ python recognize.py --image captures/zoom_1x.jpg
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--mipi` | 关闭 | 使用 MIPI CSI 摄像头 (低延迟) |
+| `--mipi` | 开启 | 使用 MIPI CSI 摄像头 (默认, 低延迟) |
 | `--sensor-id N` | `0` | MIPI 摄像头编号 |
 | `--width N` | `1280` | MIPI 采集宽度 |
 | `--height N` | `720` | MIPI 采集高度 |
 | `--fps-cap N` | `30` | MIPI 采集帧率 |
 | `--fast` | 关闭 | 快速识别模式 (ORB+颜色, ~29ms) |
 | `--save` | 关闭 | 录像保存到 `recordings/` |
-| `--rtsp URL` | `rtsp://192.168.144.25:8554/main.264` | RTSP 视频流地址 |
+| `--rtsp` | 关闭 | 切换到 RTSP 视频源 (备用) |
+| `--rtsp-url URL` | `rtsp://192.168.144.25:8554/main.264` | RTSP 地址 (仅 --rtsp 时) |
 | `--batch` | - | 批量测试 `captures/` 下所有图片 |
 | `--image PATH` | - | 单张图片测试 |
 

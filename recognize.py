@@ -10,13 +10,12 @@
 用法:
   python recognize.py --batch              # 批量测试
   python recognize.py --image xxx.jpg      # 单张测试
-  python recognize.py                      # RTSP实时 (全方法, ~1fps)
-  python recognize.py --fast               # RTSP实时 快速模式 (ORB+颜色, ~30fps)
-  python recognize.py --save               # RTSP实时 + 录像保存
+  python recognize.py                      # MIPI CSI 实时 (默认, 低延迟)
+  python recognize.py --fast               # MIPI CSI 快速模式 (~30fps)
   python recognize.py --fast --save        # 快速模式 + 录像保存
-  python recognize.py --mipi               # MIPI CSI 实时 (低延迟)
-  python recognize.py --mipi --fast        # MIPI CSI 快速模式
-  python recognize.py --mipi --sensor-id 1 # 指定摄像头ID
+  python recognize.py --rtsp               # RTSP 实时 (备用)
+  python recognize.py --rtsp --fast        # RTSP 快速模式
+  python recognize.py --sensor-id 1        # 指定 MIPI 摄像头ID
 """
 
 import cv2
@@ -365,10 +364,12 @@ def main():
     parser.add_argument("--batch", action="store_true", help="批量测试captures/下所有图片")
     parser.add_argument("--fast", action="store_true", help="快速模式: 只用ORB+颜色 (~20ms)")
     parser.add_argument("--save", action="store_true", help="保存识别视频到 recordings/")
-    parser.add_argument("--rtsp", default="rtsp://192.168.144.25:8554/main.264",
-                        help="RTSP 视频流地址")
+    parser.add_argument("--rtsp", action="store_true",
+                        help="使用 RTSP 视频源 (默认使用 MIPI CSI)")
+    parser.add_argument("--rtsp-url", default="rtsp://192.168.144.25:8554/main.264",
+                        help="RTSP 地址 (仅 --rtsp 时使用)")
     parser.add_argument("--mipi", action="store_true",
-                        help="使用 MIPI CSI 摄像头 (低延迟，替代RTSP)")
+                        help="使用 MIPI CSI 摄像头 (默认已启用)")
     parser.add_argument("--sensor-id", type=int, default=0,
                         help="MIPI 摄像头编号 (默认0)")
     parser.add_argument("--width", type=int, default=1280,
@@ -431,28 +432,29 @@ def main():
         from datetime import datetime
 
         # ---------- 视频源初始化 ----------
-        if args.mipi:
-            from mipi_camera import MIPICamera
-            t_conn0 = time.time()
-            mipi_cam = MIPICamera(sensor_id=args.sensor_id,
-                                  width=args.width, height=args.height,
-                                  fps=args.fps_cap)
-            mipi_cam.open()
-            cap = None
-            t_conn1 = time.time()
-            print(f"[阶段2] MIPI CSI 连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
-            source_label = "MIPI"
-        else:
-            mipi_cam = None
+        use_rtsp = args.rtsp
+        t_conn0 = time.time()
+
+        if use_rtsp:
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-            t_conn0 = time.time()
-            cap = cv2.VideoCapture(args.rtsp, cv2.CAP_FFMPEG)
+            cap = cv2.VideoCapture(args.rtsp_url, cv2.CAP_FFMPEG)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             t_conn1 = time.time()
-            print(f"[阶段2] RTSP连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
+            print(f"[阶段2] RTSP 连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
             source_label = "RTSP"
             if not cap.isOpened():
                 print("无法连接 RTSP")
+                return
+        else:
+            from mipi_camera import MIPICamera
+            cap = MIPICamera(sensor_id=args.sensor_id,
+                             width=args.width, height=args.height,
+                             fps=args.fps_cap)
+            t_conn1 = time.time()
+            print(f"[阶段2] MIPI CSI 连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
+            source_label = "MIPI"
+            if not cap.isOpened():
+                print("无法打开 MIPI CSI 摄像头")
                 return
 
         # 录像初始化
@@ -461,11 +463,8 @@ def main():
             os.makedirs("recordings", exist_ok=True)
             fname = datetime.now().strftime("rec_%Y%m%d_%H%M%S.mp4")
             save_path = os.path.join("recordings", fname)
-            if mipi_cam is not None:
-                fw, fh = mipi_cam.width, mipi_cam.height
-            else:
-                fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(save_path, fourcc, 25, (fw, fh))
             print(f"录像保存到: {save_path}")
@@ -562,10 +561,7 @@ def main():
         if writer is not None:
             writer.release()
             print(f"录像已保存")
-        if mipi_cam is not None:
-            mipi_cam.release()
-        if cap is not None:
-            cap.release()
+        cap.release()
         cv2.destroyAllWindows()
 
 
