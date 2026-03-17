@@ -1,15 +1,17 @@
 """
-Target Management HTTP API Server
-Port 5000, provides upload/delete/reload for target templates.
+目标管理 HTTP API 服务器
+端口 5000，提供目标模板的上传、删除、重载接口。
 
-Standalone:
+可独立运行:
   python target_server.py
 
+也可作为 recognize.py 的子线程启动。
+
 API:
-  POST   /api/targets/upload  - Upload new target image (multipart, field="image")
-  POST   /api/targets/reload  - Trigger reload
-  GET    /api/targets         - List current targets
-  DELETE /api/targets/<name>  - Delete a target
+  POST   /api/targets/upload  - 上传新目标图片 (multipart/form-data, field="image")
+  POST   /api/targets/reload  - 触发重新加载
+  GET    /api/targets         - 获取当前目标列表
+  DELETE /api/targets/<name>  - 删除某个目标
 """
 
 import os
@@ -26,11 +28,13 @@ _recognizer = None
 
 
 def set_recognizer(rec):
+    """设置外部 recognizer 实例，reload API 会直接调用其 reload_targets()"""
     global _recognizer
     _recognizer = rec
 
 
 def _read_info():
+    """读取 target_info.json"""
     info_path = os.path.join(TARGETS_DIR, INFO_FILE)
     if not os.path.exists(info_path):
         return []
@@ -39,6 +43,7 @@ def _read_info():
 
 
 def _write_info(annotations):
+    """写入 target_info.json"""
     info_path = os.path.join(TARGETS_DIR, INFO_FILE)
     with open(info_path, "w", encoding="utf-8") as f:
         json.dump(annotations, f, indent=2, ensure_ascii=False)
@@ -128,12 +133,13 @@ def delete_target(name):
 
 
 def run_server(host="0.0.0.0", port=5000, recognizer=None):
+    """启动服务器（可从外部调用）"""
     if recognizer is not None:
         set_recognizer(recognizer)
     app.run(host=host, port=port, threaded=True)
 
 
 if __name__ == "__main__":
-    print(f"Target server: http://0.0.0.0:5000")
-    print(f"Targets dir: {TARGETS_DIR}")
+    print(f"目标管理服务器启动: http://0.0.0.0:5000")
+    print(f"目标目录: {TARGETS_DIR}")
     run_server()

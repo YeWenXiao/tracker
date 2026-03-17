@@ -1,12 +1,12 @@
 """
-RTSP Live Target Annotation Tool
-- Connect to RTSP stream
-- Mouse drag to select region
-- Press s to save crop to targets/, auto-update target_info.json
-- Press q to quit
-- After save, auto-triggers recognize.py hot-reload (via file monitor or HTTP API)
+实时视频流目标标注工具
+- 连接 RTSP 流
+- 鼠标拖框选区域
+- 按 s 保存裁剪到 targets/，自动更新 target_info.json
+- 按 q 退出
+- 保存后自动触发 recognize.py 的热加载（通过 HTTP API 或文件监控）
 
-Usage:
+用法:
   python annotate_live.py
   python annotate_live.py --rtsp rtsp://192.168.144.25:8554/main.264
   python annotate_live.py --api http://localhost:5000
@@ -44,6 +44,7 @@ def mouse_cb(event, x, y, flags, param):
 
 
 def save_crop(frame, rect_coords, api_url=None):
+    """保存裁剪区域到 targets/，更新 target_info.json"""
     os.makedirs(TARGETS_DIR, exist_ok=True)
 
     info_path = os.path.join(TARGETS_DIR, INFO_FILE)
@@ -77,7 +78,7 @@ def save_crop(frame, rect_coords, api_url=None):
     with open(info_path, "w", encoding="utf-8") as f:
         json.dump(annotations, f, indent=2, ensure_ascii=False)
 
-    print(f"Saved: {crop_path} ({x2-x1}x{y2-y1})")
+    print(f"已保存: {crop_path} ({x2-x1}x{y2-y1})")
 
     if api_url:
         try:
@@ -89,36 +90,37 @@ def save_crop(frame, rect_coords, api_url=None):
                 headers={"Content-Type": "application/json"}
             )
             urllib.request.urlopen(req, timeout=2)
-            print("Reload triggered via HTTP API")
+            print("已通过 HTTP API 触发重载")
         except Exception as e:
-            print(f"HTTP API trigger failed (file monitor will still work): {e}")
+            print(f"HTTP API 触发失败 (文件监控仍会生效): {e}")
     else:
-        print("Target saved, file monitor will auto-trigger reload")
+        print("目标已保存，文件监控将自动触发重载")
 
     return crop_name
 
 
 def main():
+    """主函数"""
     global current_frame, rect, drawing, ix, iy
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="实时视频流目标标注")
     parser.add_argument("--rtsp", default="rtsp://192.168.144.25:8554/main.264")
-    parser.add_argument("--api", default=None, help="HTTP API URL (e.g. http://localhost:5000)")
+    parser.add_argument("--api", default=None, help="HTTP API 地址 (如 http://localhost:5000)")
     args = parser.parse_args()
 
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-    print(f"Connecting RTSP: {args.rtsp}")
+    print(f"连接 RTSP: {args.rtsp}")
     cap = cv2.VideoCapture(args.rtsp, cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     if not cap.isOpened():
-        print("Cannot connect to RTSP stream")
+        print("无法连接 RTSP 流")
         return
 
     cv2.namedWindow("Live Annotate")
     cv2.setMouseCallback("Live Annotate", mouse_cb)
 
-    print("Controls: mouse drag -> s=save target -> q=quit")
+    print("操作: 鼠标拖框 -> s=保存目标 -> q=退出")
     saved_count = 0
 
     while True:
@@ -150,7 +152,7 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
-    print(f"Total saved: {saved_count} targets")
+    print(f"\n共保存 {saved_count} 个目标")
 
 
 if __name__ == "__main__":
