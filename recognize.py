@@ -27,6 +27,32 @@ import time
 import glob
 
 
+def load_config(path="config.yaml"):
+    """加载 YAML 配置文件，不存在则返回空 dict"""
+    try:
+        import yaml
+        with open(path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except ImportError:
+        # 没有 PyYAML 时用简单解析
+        import re
+        cfg = {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    m = re.match(r"(\w[\w.]*\w?)\s*:\s*(.+)", line)
+                    if m:
+                        cfg[m.group(1)] = m.group(2).strip('"').strip()
+        except FileNotFoundError:
+            pass
+        return cfg
+    except FileNotFoundError:
+        return {}
+
+
 class TargetRecognizer:
     def __init__(self, targets_dir="targets"):
         self.targets = []
@@ -400,8 +426,35 @@ def main():
                         help="MIPI 采集帧率 (默认30)")
     args = parser.parse_args()
 
+    # 加载配置文件 (命令行参数优先)
+    cfg = load_config()
+    video_cfg = cfg.get("video", {})
+    mipi_cfg = video_cfg.get("mipi", {})
+    recog_cfg = cfg.get("recognition", {})
+
+    # 配置文件 fallback: 仅在命令行未指定时使用
+    if not args.rtsp and not args.mipi:
+        source = video_cfg.get("source", "mipi")
+        if source == "rtsp":
+            args.rtsp = True
+    if args.rtsp_url == "rtsp://192.168.144.25:8554/main.264":
+        args.rtsp_url = video_cfg.get("rtsp_url", args.rtsp_url)
+    if args.sensor_id == 0:
+        args.sensor_id = int(mipi_cfg.get("sensor_id", args.sensor_id))
+    if args.width == 1280:
+        args.width = int(mipi_cfg.get("width", args.width))
+    if args.height == 720:
+        args.height = int(mipi_cfg.get("height", args.height))
+    if args.fps_cap == 30:
+        args.fps_cap = int(mipi_cfg.get("fps", args.fps_cap))
+    if not args.fast:
+        args.fast = recog_cfg.get("fast_mode", False)
+        if isinstance(args.fast, str):
+            args.fast = args.fast.lower() in ("true", "1", "yes")
+    targets_dir = recog_cfg.get("targets_dir", "targets")
+
     t_start = time.time()
-    rec = TargetRecognizer()
+    rec = TargetRecognizer(targets_dir=targets_dir)
     t_load = time.time()
     print(f"[阶段1] 模板加载+特征预计算: {(t_load - t_start)*1000:.0f} ms")
 
