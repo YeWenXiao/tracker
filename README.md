@@ -11,6 +11,34 @@
 - **变焦拍摄工具也支持 MIPI**: `capture_zoom.py` 默认 MIPI 取帧 + UDP 变焦, `--rtsp` 切换
 - **MIPICamera 模块**: 独立的 `mipi_camera.py`，接口完全兼容 cv2.VideoCapture (isOpened/read/get/set/release)
 
+## v2.0 Round 2 优化
+
+- **CUDA 加速预处理**: 自动检测 cv2.cuda 模块，使用 GpuMat 加速 cvtColor (BGR→GRAY/HSV) 和 resize，无 CUDA 时自动回退 CPU
+- **config.yaml 配置文件**: 视频源、MIPI 参数、识别模式、云台地址均可通过配置文件设定，命令行参数优先覆盖
+- **MIPI→RTSP 自动降级**: MIPI CSI 打开失败时自动尝试 RTSP 连接，打印清晰的降级提示
+
+### 配置文件示例 (config.yaml)
+
+```yaml
+video:
+  source: mipi  # mipi or rtsp
+  rtsp_url: "rtsp://192.168.144.25:8554/main.264"
+  mipi:
+    sensor_id: 0
+    width: 1280
+    height: 720
+    fps: 30
+    flip_method: 0
+
+recognition:
+  fast_mode: true
+  targets_dir: targets
+
+gimbal:
+  ip: "192.168.144.25"
+  port: 37260
+```
+
 ## 技术方案
 
 采用多方法传统视觉识别引擎，5种方法互补：
@@ -136,7 +164,8 @@ python recognize.py --image captures/zoom_1x.jpg
 
 ```
 a8mini_tracker/
-├── recognize.py       # 核心识别引擎 (多方法 + MIPI/RTSP实时 + 录像)
+├── recognize.py       # 核心识别引擎 (多方法 + MIPI/RTSP实时 + 录像 + CUDA加速)
+├── config.yaml        # 配置文件 (视频源/识别参数/云台地址)
 ├── capture_zoom.py    # MIPI/RTSP 多变焦抓图工具
 ├── mipi_camera.py     # MIPI CSI 采集模块 (GStreamer + nvarguscamerasrc)
 ├── annotate.py        # 目标区域标注/裁剪工具
