@@ -434,13 +434,16 @@ def main():
         if args.mipi:
             from mipi_camera import MIPICamera
             t_conn0 = time.time()
-            cap = MIPICamera(sensor_id=args.sensor_id,
-                             width=args.width, height=args.height,
-                             fps=args.fps_cap)
+            mipi_cam = MIPICamera(sensor_id=args.sensor_id,
+                                  width=args.width, height=args.height,
+                                  fps=args.fps_cap)
+            mipi_cam.open()
+            cap = None
             t_conn1 = time.time()
-            print(f"[阶段2] MIPI 摄像头初始化: {(t_conn1 - t_conn0)*1000:.0f} ms")
+            print(f"[阶段2] MIPI CSI 连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
             source_label = "MIPI"
         else:
+            mipi_cam = None
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
             t_conn0 = time.time()
             cap = cv2.VideoCapture(args.rtsp, cv2.CAP_FFMPEG)
@@ -448,9 +451,9 @@ def main():
             t_conn1 = time.time()
             print(f"[阶段2] RTSP连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
             source_label = "RTSP"
-        if not cap.isOpened():
-            print("无法连接")
-            return
+            if not cap.isOpened():
+                print("无法连接 RTSP")
+                return
 
         # 录像初始化
         writer = None
@@ -458,8 +461,11 @@ def main():
             os.makedirs("recordings", exist_ok=True)
             fname = datetime.now().strftime("rec_%Y%m%d_%H%M%S.mp4")
             save_path = os.path.join("recordings", fname)
-            fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if mipi_cam is not None:
+                fw, fh = mipi_cam.width, mipi_cam.height
+            else:
+                fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(save_path, fourcc, 25, (fw, fh))
             print(f"录像保存到: {save_path}")
@@ -502,9 +508,14 @@ def main():
 
         while True:
             t_frame_start = time.time()
-            ret, frame = cap.read()
-            if not ret:
-                continue
+            if mipi_cam is not None:
+                frame = mipi_cam.read()
+                if frame is None:
+                    continue
+            else:
+                ret, frame = cap.read()
+                if not ret:
+                    continue
             capture_latency_ms = (time.time() - t_frame_start) * 1000
 
             if first_frame:
@@ -522,7 +533,10 @@ def main():
                 results = latest_results[0]
                 timing = latest_results[1]
 
-            current_fps = fps_counter.tick()
+            if mipi_cam is not None:
+                current_fps = mipi_cam.get_fps()
+            else:
+                current_fps = fps_counter.tick()
             status = f"{source_label} " + ("FAST" if use_fast else "FULL") + (" PAUSED" if paused else "")
             display = draw_results(frame, results, timing, status,
                                    fps=current_fps, latency_ms=capture_latency_ms)
@@ -548,7 +562,10 @@ def main():
         if writer is not None:
             writer.release()
             print(f"录像已保存")
-        cap.release()
+        if mipi_cam is not None:
+            mipi_cam.release()
+        if cap is not None:
+            cap.release()
         cv2.destroyAllWindows()
 
 
