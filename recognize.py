@@ -14,6 +14,7 @@
   python recognize.py --fast               # RTSP实时 快速模式 (ORB+颜色, ~30fps)
   python recognize.py --save               # RTSP实时 + 录像保存
   python recognize.py --fast --save        # 快速模式 + 录像保存
+  python recognize.py --fast --api         # 快速模式 + HTTP API 服务器
 """
 
 import cv2
@@ -413,6 +414,8 @@ def main():
     parser.add_argument("--fast", action="store_true", help="快速模式: 只用ORB+颜色 (~20ms)")
     parser.add_argument("--save", action="store_true", help="保存识别视频到 recordings/")
     parser.add_argument("--rtsp", default="rtsp://192.168.144.25:8554/main.264")
+    parser.add_argument("--api", action="store_true", help="启动 HTTP API 服务器 (端口5000)")
+    parser.add_argument("--api-port", type=int, default=5000, help="API端口")
     args = parser.parse_args()
 
     t_start = time.time()
@@ -465,6 +468,16 @@ def main():
     else:
         import threading
         from datetime import datetime
+
+        # 启动 HTTP API 服务器（可选）
+        if args.api:
+            from target_server import run_server, set_recognizer
+            set_recognizer(rec)
+            api_thread = threading.Thread(target=run_server,
+                                          kwargs={"port": args.api_port},
+                                          daemon=True)
+            api_thread.start()
+            print(f"[API] HTTP 服务器已启动: http://0.0.0.0:{args.api_port}")
 
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
         t_conn0 = time.time()
