@@ -375,6 +375,31 @@ class TargetRecognizer:
         return keep
 
 
+def get_system_stats():
+    """获取系统状态 (Jetson 温度 + 内存)"""
+    stats = {}
+    # CPU温度 (Jetson)
+    try:
+        with open("/sys/devices/virtual/thermal/thermal_zone0/temp") as f:
+            stats["cpu_temp"] = int(f.read().strip()) / 1000
+    except Exception:
+        pass
+    # GPU温度 (Jetson)
+    try:
+        with open("/sys/devices/virtual/thermal/thermal_zone1/temp") as f:
+            stats["gpu_temp"] = int(f.read().strip()) / 1000
+    except Exception:
+        pass
+    # 内存使用
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        stats["mem_percent"] = mem.percent
+    except Exception:
+        pass
+    return stats
+
+
 def draw_results(img, results, timing=None, label="", fps=None, latency_ms=None,
                  roi=None, system_stats=None):
     """在图上画识别结果和计时信息"""
@@ -684,6 +709,10 @@ def main():
         roi_end = None
         roi_temp = [None]
 
+        # 系统状态缓存 (每秒更新)
+        sys_stats_cache = [{}]
+        sys_stats_time = [0]
+
         def mouse_callback(event, x, y, flags, param):
             nonlocal roi, roi_drawing, roi_start, roi_end
             if not roi_drawing:
@@ -794,6 +823,12 @@ def main():
                 current_fps = cap.get_actual_fps()
             else:
                 current_fps = fps_counter.tick()
+            # 系统状态 (每秒更新)
+            now_stats = time.time()
+            if now_stats - sys_stats_time[0] > 1.0:
+                sys_stats_cache[0] = get_system_stats()
+                sys_stats_time[0] = now_stats
+
             status = f"{source_label} " + ("FAST" if use_fast else "FULL") + (" PAUSED" if paused else "")
             if roi_drawing:
                 status += " [ROI绘制中...]"
@@ -802,7 +837,7 @@ def main():
             display_roi = roi_temp[0] if roi_drawing and roi_temp[0] else roi
             display = draw_results(frame, results, timing, status,
                                    fps=current_fps, latency_ms=capture_latency_ms,
-                                   roi=display_roi)
+                                   roi=display_roi, system_stats=sys_stats_cache[0])
 
             # 写入录像（带识别框的画面）
             if writer is not None:
