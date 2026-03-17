@@ -25,9 +25,20 @@ import argparse
 import time
 import glob
 import queue
+import pickle
+import hashlib
 from collections import deque
 
 from target_history import TargetHistory
+
+
+CACHE_DIR = ".feature_cache"
+
+
+def _get_image_hash(img_path):
+    """基于文件路径和修改时间的缓存key"""
+    stat = os.stat(img_path)
+    return hashlib.md5(f"{img_path}:{stat.st_mtime}:{stat.st_size}".encode()).hexdigest()[:16]
 
 
 # 全局 SSE 事件队列列表（每个 SSE 客户端一个队列）
@@ -140,32 +151,89 @@ class TargetRecognizer:
         self._load(targets_dir)
 
 
+    def _load_cache(self, cache_key):
+        """从磁盘缓存加载特征数据"""
+        cache_path = os.path.join(CACHE_DIR, f"{cache_key}.pkl")
+        if not os.path.exists(cache_path):
+            return None
+        try:
+            with open(cache_path, "rb") as f:
+                data = pickle.load(f)
+            # 重建 keypoints（pickle 不能直接序列化 cv2.KeyPoint）
+            if "orb_kp_data" in data:
+                data["orb_kp"] = [cv2.KeyPoint(*kp) for kp in data.pop("orb_kp_data")]
+            if "sift_kp_data" in data:
+                data["sift_kp"] = [cv2.KeyPoint(*kp) for kp in data.pop("sift_kp_data")]
+            return data
+        except Exception:
+            return None
+
+    def _save_cache(self, cache_key, target):
+        """将特征数据保存到磁盘缓存"""
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        data = dict(target)
+        # cv2.KeyPoint 转为可序列化的 tuple
+        if "orb_kp" in data and data["orb_kp"]:
+            data["orb_kp_data"] = [(kp.pt[0], kp.pt[1], kp.size, kp.angle,
+                                     kp.response, kp.octave, kp.class_id)
+                                    for kp in data["orb_kp"]]
+            del data["orb_kp"]
+        if "sift_kp" in data and data["sift_kp"]:
+            data["sift_kp_data"] = [(kp.pt[0], kp.pt[1], kp.size, kp.angle,
+                                      kp.response, kp.octave, kp.class_id)
+                                     for kp in data["sift_kp"]]
+            del data["sift_kp"]
+
+        cache_path = os.path.join(CACHE_DIR, f"{cache_key}.pkl")
+        with open(cache_path, "wb") as f:
+            pickle.dump(data, f)
+
     def _prepare_single_target(self, targets_dir, ann):
-        """为单个模板计算所有特征，返回特征字典；失败返回 None"""
-        img = cv2.imread(os.path.join(targets_dir, ann["crop"]))
+        """计算单个模板的所有特征，返回 dict 或失败时返回 None"""
+        img_path = os.path.join(targets_dir, ann["crop"])
+        if not os.path.exists(img_path):
+            return None
+
+        # 尝试从缓存加载
+        try:
+            cache_key = _get_image_hash(img_path)
+            cached = self._load_cache(cache_key)
+            if cached:
+                # 运行时元数据可能变化，用 annotation 中的最新值覆盖
+                cached["weight"] = float(ann.get("weight", 1.0))
+                cached["min_confidence"] = float(ann.get("min_confidence", 0.45))
+                cached["group"] = ann.get("group", "")
+                print(f"  [Cache HIT] {ann['crop']}")
+                return cached
+        except Exception:
+            cache_key = None
+
+        img = cv2.imread(img_path)
         if img is None:
             return None
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-        # ORB 特征
+        # ORB
         orb_kp, orb_des = self.orb.detectAndCompute(gray, None)
-        # SIFT 特征
+        # SIFT
         sift_kp, sift_des = self.sift.detectAndCompute(gray, None)
-        # HSV 直方图（用于颜色验证）
+        # HSV histogram
         hist_hs = cv2.calcHist([hsv], [0, 1], None, [30, 32], [0, 180, 0, 256])
         cv2.normalize(hist_hs, hist_hs)
-        # HSV 直方图（用于反投影）
+        # Backprojection histogram
         hist_bp = cv2.calcHist([hsv], [0, 1], None, [180, 256], [0, 180, 0, 256])
         cv2.normalize(hist_bp, hist_bp, 0, 255, cv2.NORM_MINMAX)
-        # 边缘
+        # Edges
         edges = cv2.Canny(gray, 50, 150)
 
         # 读取目标权重和最低置信度（默认 weight=1.0, min_confidence=0.45）
         weight = float(ann.get("weight", 1.0))
         min_confidence = float(ann.get("min_confidence", 0.45))
 
-        return {
+        group = ann.get("group", "")
+
+        target = {
             "name": ann["crop"],
             "source": ann["source"],
             "image": img,
@@ -178,8 +246,19 @@ class TargetRecognizer:
             "edges": edges,
             "weight": weight,
             "min_confidence": min_confidence,
-            "group": ann.get("group", ""),
+            "group": group,
         }
+
+        # 保存到缓存
+        if cache_key:
+            try:
+                self._save_cache(cache_key, target)
+                print(f"  [Cache SAVE] {ann['crop']}")
+            except Exception as e:
+                print(f"  [Cache SAVE FAILED] {ann['crop']}: {e}")
+
+        return target
+
 
     def _prepare_targets(self, targets_dir):
         """准备目标模板列表（不修改 self.targets），返回新列表"""
