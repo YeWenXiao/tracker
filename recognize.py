@@ -119,6 +119,14 @@ def _deserialize_keypoints(kp_tuples):
 
 class TargetRecognizer:
     def __init__(self, targets_dir="targets"):
+        """目标识别器初始化
+
+        创建 ORB/SIFT 特征提取器、匹配器，检测 CUDA 加速可用性，
+        并从 targets_dir 加载所有目标模板（含磁盘缓存加速）。
+
+        Args:
+            targets_dir: 目标模板目录路径，需包含 target_info.json
+        """
         self.targets = []
         self.orb = cv2.ORB_create(nfeatures=2000)
         self.sift = cv2.SIFT_create(nfeatures=1000)
@@ -494,7 +502,24 @@ def get_system_stats():
 
 def draw_results(img, results, timing=None, label="", fps=None, latency_ms=None,
                  roi=None, system_stats=None):
-    """在图上画识别结果和计时信息"""
+    """在图像上绘制识别结果框、计时信息和系统状态 OSD
+
+    在场景图上叠加: 识别框(颜色按得分分级)、ROI 虚线框、
+    FPS/延迟/各方法耗时、CPU/GPU温度等系统状态。
+
+    Args:
+        img: 原始场景图 (BGR)
+        results: 识别结果列表 [(score, x, y, w, h, method), ...]
+        timing: 各方法耗时字典
+        label: 左上角状态文本
+        fps: 当前帧率
+        latency_ms: 采集延迟(ms)
+        roi: ROI 区域 [x, y, w, h] 或 None
+        system_stats: 系统状态字典 (CPU温度等)
+
+    Returns:
+        display: 叠加了所有 OSD 信息的图像副本
+    """
     display = img.copy()
     for score, x, y, w, h, method in results:
         color = (0, 255, 0) if score > 0.6 else (0, 255, 255) if score > 0.4 else (0, 0, 255)
@@ -609,6 +634,19 @@ class FPSCounter:
 
 
 def main():
+    """主入口: 解析命令行参数，初始化视频源/识别器/追踪器，运行主循环
+
+    支持三种运行模式:
+    - 批量测试 (--batch): 扫描 captures/ 目录，逐张识别并保存结果
+    - 单张测试 (--image): 对指定图片做识别并显示
+    - 实时模式 (默认): MIPI CSI 或 RTSP 视频流，后台识别线程 + 追踪
+
+    实时模式启动阶段:
+      阶段1: 模板加载 + 特征预计算
+      阶段2: 视频源连接 (MIPI/RTSP)
+      阶段3: 收到第一帧
+      阶段4: 首次识别到目标
+    """
     parser = argparse.ArgumentParser(
         description="A8mini 目标识别追踪系统 v2.0",
         formatter_class=argparse.RawDescriptionHelpFormatter,
