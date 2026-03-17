@@ -24,6 +24,33 @@ import json
 import argparse
 import time
 import glob
+import queue
+
+
+# 全局 SSE 事件队列列表（每个 SSE 客户端一个队列）
+_sse_clients = []
+
+def push_event(event):
+    """向所有 SSE 客户端推送事件"""
+    dead = []
+    for q in _sse_clients:
+        try:
+            q.put_nowait(event)
+        except queue.Full:
+            dead.append(q)
+    for q in dead:
+        _sse_clients.remove(q)
+
+def register_sse_client():
+    """注册新的 SSE 客户端，返回事件队列"""
+    q = queue.Queue(maxsize=100)
+    _sse_clients.append(q)
+    return q
+
+def unregister_sse_client(q):
+    """注销 SSE 客户端"""
+    if q in _sse_clients:
+        _sse_clients.remove(q)
 
 
 class TargetRecognizer:
@@ -62,6 +89,10 @@ class TargetRecognizer:
         # 边缘
         edges = cv2.Canny(gray, 50, 150)
 
+        # 读取目标权重和最低置信度（默认 weight=1.0, min_confidence=0.45）
+        weight = float(ann.get("weight", 1.0))
+        min_confidence = float(ann.get("min_confidence", 0.45))
+
         return {
             "name": ann["crop"],
             "source": ann["source"],
@@ -73,6 +104,8 @@ class TargetRecognizer:
             "hist_hs": hist_hs,
             "hist_bp": hist_bp,
             "edges": edges,
+            "weight": weight,
+            "min_confidence": min_confidence,
         }
 
     def _prepare_targets(self, targets_dir):
@@ -139,6 +172,14 @@ class TargetRecognizer:
             self.targets = all_targets
             self._last_reload_time = time.time()
             print(f"[热加载] +{len(added)} -{len(removed)} 保留{len(kept)} = 共{len(all_targets)} 个模板")
+            # 推送 SSE 重载事件
+            push_event({
+                "type": "reload",
+                "added": len(added),
+                "removed": len(removed),
+                "count": len(all_targets),
+                "time": self._last_reload_time,
+            })
         except Exception as e:
             print(f"[热加载] 失败: {e}")
     def recognize(self, scene_bgr, fast=False):
@@ -301,13 +342,22 @@ class TargetRecognizer:
             hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
             hist = cv2.calcHist([hsv], [0, 1], None, [30, 32], [0, 180, 0, 256])
             cv2.normalize(hist, hist)
-            color_score = max(
-                cv2.compareHist(t["hist_hs"], hist, cv2.HISTCMP_CORREL)
-                for t in targets
-            )
-            combined = 0.4 * score + 0.6 * max(color_score, 0)
-            if combined >= 0.45:
-                verified.append((combined, x, y, x2-x, y2-y, method))
+            # 对每个目标计算颜色相似度，找到最佳匹配的目标
+            best_color_score = -1
+            best_target = targets[0] if targets else None
+            for t in targets:
+                cs = cv2.compareHist(t["hist_hs"], hist, cv2.HISTCMP_CORREL)
+                if cs > best_color_score:
+                    best_color_score = cs
+                    best_target = t
+            # 使用最佳匹配目标的 min_confidence 和 weight
+            min_conf = best_target.get("min_confidence", 0.45) if best_target else 0.45
+            weight = best_target.get("weight", 1.0) if best_target else 1.0
+            combined = 0.4 * score + 0.6 * max(best_color_score, 0)
+            if combined >= min_conf:
+                # 最终得分乘以目标权重
+                weighted_score = combined * weight
+                verified.append((weighted_score, x, y, x2-x, y2-y, method))
 
         verified.sort(key=lambda r: r[0], reverse=True)
         timing["nms_verify"] = time.time() - t0
@@ -522,6 +572,18 @@ def main():
                 with lock:
                     latest_results[0] = results
                     latest_results[1] = timing
+                # 推送识别结果 SSE 事件
+                if results:
+                    best = results[0]
+                    push_event({
+                        "type": "detection",
+                        "score": round(best[0], 4),
+                        "x": best[1], "y": best[2],
+                        "w": best[3], "h": best[4],
+                        "method": best[5],
+                        "count": len(results),
+                        "time": time.time(),
+                    })
                 if first_detect[0] and results:
                     t_found = time.time()
                     print(f"[阶段4] 首次识别到目标: {(t_found - t_start)*1000:.0f} ms (从启动算起)")
