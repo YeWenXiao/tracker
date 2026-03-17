@@ -520,15 +520,34 @@ def main():
                 return
         else:
             from mipi_camera import MIPICamera
-            cap = MIPICamera(sensor_id=args.sensor_id,
-                             width=args.width, height=args.height,
-                             fps=args.fps_cap)
-            t_conn1 = time.time()
-            print(f"[阶段2] MIPI CSI 连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
-            source_label = "MIPI"
-            if not cap.isOpened():
-                print("无法打开 MIPI CSI 摄像头")
-                return
+            mipi_ok = False
+            try:
+                cap = MIPICamera(sensor_id=args.sensor_id,
+                                 width=args.width, height=args.height,
+                                 fps=args.fps_cap)
+                if cap.isOpened():
+                    mipi_ok = True
+                else:
+                    cap.release()
+            except Exception as e:
+                print(f"[WARNING] MIPI 打开失败: {e}")
+
+            if mipi_ok:
+                t_conn1 = time.time()
+                print(f"[阶段2] MIPI CSI 连接建立: {(t_conn1 - t_conn0)*1000:.0f} ms")
+                source_label = "MIPI"
+            else:
+                # 自动降级到 RTSP
+                print(f"[WARNING] MIPI 不可用, 自动降级到 RTSP: {args.rtsp_url}")
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+                cap = cv2.VideoCapture(args.rtsp_url, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                t_conn1 = time.time()
+                print(f"[阶段2] RTSP 连接建立 (降级): {(t_conn1 - t_conn0)*1000:.0f} ms")
+                source_label = "RTSP(fallback)"
+                if not cap.isOpened():
+                    print("无法连接 RTSP, 退出")
+                    return
 
         # 录像初始化
         writer = None
