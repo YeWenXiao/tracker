@@ -1,6 +1,38 @@
-# A8mini Target Tracker v1.0
+# A8mini Target Tracker
 
-基于 SIYI A8mini 云台相机的目标图像学习识别系统。通过少量目标模板照片，在 RTSP 视频流中实时识别特定目标，无需训练神经网络。
+基于 SIYI A8mini 云台相机的目标图像学习识别追踪系统。通过少量目标模板照片，实时识别并追踪特定目标，无需训练神经网络。
+
+## 版本
+
+| 版本 | 分支 | 核心能力 | Commits | 状态 |
+|------|------|---------|---------|------|
+| v1.0 | main | 基线识别引擎（5种方法） | 1 | ✅ 稳定 |
+| v1.5 | [v1.5-hotswap](../../tree/v1.5-hotswap) | 不停流热更换识别目标 | 25 | ✅ 9轮迭代 |
+| v2.0 | [v2.0-mipi](../../tree/v2.0-mipi) | MIPI CSI 低延迟 + 追踪 | 30 | ✅ 9轮迭代 |
+
+## 版本功能对比
+
+| 功能 | v1.0 | v1.5 | v2.0 |
+|------|------|------|------|
+| 多方法识别引擎 (模板/ORB/SIFT/颜色/边缘) | ✅ | ✅ | ✅ |
+| RTSP 视频流 | ✅ | ✅ | ✅ (fallback) |
+| MIPI CSI 低延迟视频 | - | - | ✅ |
+| CUDA 加速 (预处理+模板匹配) | - | - | ✅ |
+| 卡尔曼+CSRT 多目标追踪 | - | - | ✅ |
+| 云台自动跟踪 | - | - | ✅ |
+| 热更换识别目标 (不停流) | - | ✅ | - |
+| HTTP API + 管理页面 | - | ✅ | - |
+| 目标分组管理 | - | ✅ | - |
+| SSE 实时事件通知 | - | ✅ | - |
+| 目标版本管理 + 回滚 | - | ✅ | - |
+| 特征磁盘缓存 | - | ✅ | ✅ |
+| ROI 区域识别 | - | - | ✅ |
+| 多进程架构 | - | - | ✅ |
+| Systemd 服务 | - | - | ✅ |
+| API Token 认证 | - | ✅ | - |
+| 识别报告导出 | - | ✅ | - |
+| 单元测试 | - | - | ✅ |
+| 性能 Benchmark | - | - | ✅ |
 
 ## 技术方案
 
@@ -23,89 +55,111 @@
 - 跳过 SIFT 和边缘匹配
 - **实测识别耗时：29ms/帧**
 
-## 性能实测
+## 性能对比
 
-| 阶段 | 耗时 | 说明 |
-|------|------|------|
-| 模板加载 + 特征预计算 | 87ms | 5个目标模板 |
-| RTSP 连接建立 | 900ms | TCP模式 |
-| 收到第一帧 | 1000ms | 从启动算起 |
-| 首次识别到目标 | **1098ms** | 从启动算起 |
-| 单帧识别 (快速模式) | **29ms** | ~34fps |
-| 单帧识别 (全量模式) | ~1000ms | ~1fps |
+| 指标 | v1.0 (RTSP) | v2.0 (MIPI) | v2.0 (MIPI+CUDA) |
+|------|------------|-------------|-------------------|
+| 模板加载 | 87ms | 87ms (首次) / 5ms (缓存) | 同左 |
+| 首帧延迟 | ~1000ms | ~50ms | ~50ms |
+| 单帧识别 (快速) | 29ms | 29ms | <10ms |
+| 单帧识别 (全量) | ~1000ms | ~1000ms | ~300ms |
+| 追踪模式帧率 | - | - | ~60fps |
 
-## 使用方法
+## 快速开始
 
-### 1. 采集目标照片
+### 安装
 
 ```bash
+git clone https://github.com/YeWenXiao/tracker.git
+cd tracker
+pip install -r requirements.txt
+
+# v2.0: 检查 Jetson 环境
+python check_env.py
+```
+
+### 使用 v1.0 基线
+
+```bash
+# 1. 采集目标照片
 python capture_zoom.py
-```
 
-- `+/-` 调整变焦 (1x/2x/3x/4x/6x)
-- `空格` 拍照保存到 `captures/`
-- `q` 退出
-
-### 2. 标注目标区域
-
-```bash
+# 2. 标注目标区域
 python annotate.py
+
+# 3. 实时识别
+python recognize.py --fast
 ```
 
-- 鼠标框选目标区域
-- 自动裁剪保存到 `targets/`，生成 `target_info.json`
-
-### 3. 实时识别
+### 使用 v1.5 (热更换目标)
 
 ```bash
-# 快速模式 (~29ms/帧)
-python recognize.py --fast
+git checkout v1.5-hotswap
 
-# 快速模式 + 录像保存
-python recognize.py --fast --save
+# 实时识别 + HTTP API
+python recognize.py --fast --api
 
-# 全量模式 (5种方法全跑)
-python recognize.py
+# 浏览器打开管理页面
+# http://localhost:5000
 
-# 批量测试图片
-python recognize.py --batch
-
-# 单张图片测试
-python recognize.py --image captures/zoom_1x.jpg
+# 运行时按 r 重新加载目标，按 g 切换分组
 ```
 
-运行时按键：
-- `f` 切换快速/全量模式
-- `p` 暂停/继续识别
-- `q` 退出
+### 使用 v2.0 (MIPI + 追踪)
+
+```bash
+git checkout v2.0-mipi
+
+# MIPI 快速模式 + 云台自动跟踪
+python recognize.py --fast --auto-track
+
+# RTSP 模式 (非 Jetson 平台)
+python recognize.py --fast --rtsp
+
+# 多进程模式
+python recognize.py --fast --multiprocess
+
+# 部署为系统服务
+sudo bash install.sh
+```
 
 ## 硬件配置
 
 - **相机：** SIYI A8mini 云台相机
-- **视频流：** RTSP `rtsp://192.168.144.25:8554/main.264` (1280×720, HEVC)
+- **计算平台：** Jetson Orin Nano (v2.0) / 任意 Linux (v1.0/v1.5)
+- **视频流：** RTSP `rtsp://192.168.144.25:8554/main.264` 或 MIPI CSI
 - **云台控制：** UDP `192.168.144.25:37260` (SIYI 私有协议)
-- **传输模式：** TCP (避免 UDP 丢包)
 
-## 文件结构
-
-```
-a8mini_tracker/
-├── recognize.py       # 核心识别引擎 (多方法 + 实时视频流 + 录像)
-├── capture_zoom.py    # RTSP 多变焦抓图工具
-├── annotate.py        # 目标区域标注/裁剪工具
-├── siyi_sdk.py        # A8mini 云台协议 (变焦控制)
-├── captures/          # 采集的场景图 (1x~4x 变焦)
-├── targets/           # 目标模板 (裁剪图 + target_info.json)
-└── recordings/        # 识别录像输出 (MP4, git忽略)
-```
-
-## 依赖
+## 文件结构 (v1.0 基线)
 
 ```
-Python 3.8+
-opencv-python (含 contrib, 需要 SIFT)
-numpy
+tracker/
+├── recognize.py       # 核心识别引擎
+├── capture_zoom.py    # 多变焦抓图工具
+├── annotate.py        # 目标区域标注工具
+├── siyi_sdk.py        # A8mini 云台协议
+├── captures/          # 采集的场景图
+├── targets/           # 目标模板
+├── docs/              # 开发日志和版本记录
+│   ├── README.md
+│   ├── v1.5_changelog.md
+│   ├── v2.0_changelog.md
+│   ├── decisions.md
+│   └── improvements.md
+└── recordings/        # 识别录像输出
 ```
+
+v1.5 额外文件：`target_server.py`, `target_history.py`, `annotate_live.py`
+v2.0 额外文件：`mipi_camera.py`, `tracker.py`, `pipeline.py`, `benchmark.py`, `logger.py`, `config.yaml`, `check_env.py`, `install.sh`, `tracker.service`
+
+## 开发记录
+
+详细的版本迭代记录见 [docs/](docs/) 目录：
+- [总览](docs/README.md) - 项目概要和版本规划
+- [v1.5 变更日志](docs/v1.5_changelog.md) - 9轮迭代详细记录
+- [v2.0 变更日志](docs/v2.0_changelog.md) - 9轮迭代详细记录
+- [决策记录](docs/decisions.md) - 每轮优化方向的决策依据
+- [改进点跟踪](docs/improvements.md) - 所有优化项状态
 
 ## 为什么不用 YOLO
 
