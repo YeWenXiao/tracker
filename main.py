@@ -90,8 +90,8 @@ def main():
         print(f'[云台] 已连接并回正: {args.camera_ip}, zoom=1x')
 
     # ==================== 4. PID ====================
-    yaw_pid = PID(kp=12, ki=0.05, kd=4.0, max_out=35)
-    pitch_pid = PID(kp=12, ki=0.05, kd=4.0, max_out=35)
+    yaw_pid = PID(kp=25, ki=0.05, kd=5.0, max_out=60)
+    pitch_pid = PID(kp=25, ki=0.05, kd=5.0, max_out=60)
 
     # ==================== 5. Zoom管理 ====================
     zoom_mgr = ZoomManager(gimbal)
